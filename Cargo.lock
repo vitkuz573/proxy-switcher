@@ -1576,6 +1576,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "proxy-test"
+version = "0.1.0"
+dependencies = [
+ "proxy-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"

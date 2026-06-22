@@ -67,6 +67,11 @@ impl AsyncWrite for ForwardConnection {
 pub struct Forwarder;
 
 impl Forwarder {
+    pub async fn connect_direct(target: &str, port: u16) -> Result<ForwardConnection> {
+        let stream = tokio::net::TcpStream::connect(format!("{target}:{port}")).await?;
+        Ok(ForwardConnection::Direct(stream))
+    }
+
     pub async fn connect_to(proxy: &ProxyInfo, target: &str, port: u16) -> Result<ForwardConnection> {
         let proxy_addr = format!("{}:{}", proxy.host, proxy.port);
 
@@ -95,7 +100,8 @@ impl Forwarder {
                 let mut buf = [0u8; 1024];
                 let n = s.read(&mut buf).await?;
                 let response = String::from_utf8_lossy(&buf[..n]);
-                if !response.starts_with("HTTP/1.1 200") {
+                let alive = response.contains("200 Connection established") || response.contains("200 OK");
+                if !alive {
                     anyhow::bail!("HTTP CONNECT failed: {}", response.lines().next().unwrap_or("unknown"));
                 }
                 Ok(ForwardConnection::HttpConnect(s))
