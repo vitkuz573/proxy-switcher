@@ -1,0 +1,9 @@
+{
+  "workflow": "gsd",
+  "language": "rust",
+  "build_system": "cargo",
+  "test_command": "cargo test",
+  "lint_command": "cargo clippy",
+  "frontend": "react",
+  "auto_research": false
+}

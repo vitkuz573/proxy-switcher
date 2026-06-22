@@ -74,7 +74,15 @@ pub fn build_response_packet(original: &ParsedPacket, payload: &[u8]) -> Vec<u8>
     pkt.extend_from_slice(&tcp.destination_port.to_be_bytes());
     pkt.extend_from_slice(&tcp.source_port.to_be_bytes());
     pkt.extend_from_slice(&tcp.acknowledgment_number.to_be_bytes());
-    pkt.extend_from_slice(&tcp.sequence_number.wrapping_add(1).to_be_bytes());
+    let payload_len = original.payload.len() as u32;
+    let ack_num = if original.is_tcp_syn() || original.is_tcp_fin() {
+        tcp.sequence_number.wrapping_add(1)
+    } else if payload_len > 0 {
+        tcp.sequence_number.wrapping_add(payload_len)
+    } else {
+        tcp.acknowledgment_number
+    };
+    pkt.extend_from_slice(&ack_num.to_be_bytes());
     pkt.push(0x50); // data offset = 20
     pkt.push(0x10); // ACK
     pkt.extend_from_slice(&(65535u16).to_be_bytes()); // window

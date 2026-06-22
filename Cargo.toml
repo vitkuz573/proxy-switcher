@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/proxy-core",
+    "crates/proxy-daemon",
+    "crates/proxy-cli",
+]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+axum = "0.7"
+reqwest = { version = "0.12", features = ["socks"] }
+toml = "0.8"
+url = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

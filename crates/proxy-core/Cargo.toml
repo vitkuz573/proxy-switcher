@@ -1,0 +1,39 @@
+[package]
+name = "proxy-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core library for proxy management — TUN I/O, forwarding, scraping, health checks"
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+reqwest.workspace = true
+url.workspace = true
+
+# TUN device
+tun = "0.7"
+
+# SOCKS
+tokio-socks = "0.5"
+
+# DNS
+hickory-resolver = "0.24"
+
+# HTML parsing
+scraper = "0.21"
+
+# Async
+tokio-stream = "0.1"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3"

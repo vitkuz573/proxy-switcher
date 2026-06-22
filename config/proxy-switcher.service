@@ -1,0 +1,14 @@
+[Unit]
+Description=Proxy Switcher Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/proxy-daemon --config /etc/proxy-switcher/config.toml
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

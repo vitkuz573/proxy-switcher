@@ -1,0 +1,15 @@
+[package]
+name = "proxy-cli"
+version = "0.1.0"
+edition = "2021"
+description = "CLI client for proxy-switcher daemon"
+
+[dependencies]
+proxy-core = { path = "../proxy-core" }
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+reqwest = { version = "0.12", features = ["json"] }
