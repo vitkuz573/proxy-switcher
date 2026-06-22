@@ -293,4 +293,8 @@ impl Router {
     pub async fn active_udp_flows(&self) -> usize {
         self.udp_tracker.len().await
     }
+
+    pub async fn dns_cache_entries(&self) -> Vec<(std::net::Ipv4Addr, String)> {
+        self.dns_cache.entries().await
+    }
 }

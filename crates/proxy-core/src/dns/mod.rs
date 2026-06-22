@@ -56,6 +56,15 @@ impl DnsCache {
     pub async fn lookup(&self, ip: Ipv4Addr) -> Option<String> {
         self.inner.read().await.get(&u32::from(ip)).cloned()
     }
+
+    pub async fn entries(&self) -> Vec<(Ipv4Addr, String)> {
+        self.inner
+            .read()
+            .await
+            .iter()
+            .map(|(k, v)| (Ipv4Addr::from(*k), v.clone()))
+            .collect()
+    }
 }
 
 /// Parse a DNS response payload (after UDP header) and extract A record mappings.

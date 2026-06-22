@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Proxy Switcher</title>
+<link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="brand">Proxy Switcher</div>
+  <ul class="nav-links">
+    <li><a href="#" data-view="dashboard" class="active">Dashboard</a></li>
+    <li><a href="#" data-view="proxies">Proxies</a></li>
+    <li><a href="#" data-view="connections">Connections</a></li>
+    <li><a href="#" data-view="dns">DNS Cache</a></li>
+  </ul>
+</nav>
+
+<main class="content">
+  <header class="topbar">
+    <h1 id="view-title">Dashboard</h1>
+    <span class="status-badge" id="status-badge">Connecting...</span>
+  </header>
+
+  <!-- Dashboard View -->
+  <section id="view-dashboard" class="view active">
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Active Proxy</div>
+        <div class="stat-value" id="stat-active-proxy">—</div>
+        <div class="stat-detail" id="stat-active-score"></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Pool</div>
+        <div class="stat-value"><span id="stat-pool-healthy">0</span> / <span id="stat-pool-total">0</span></div>
+        <div class="stat-detail">healthy / total</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">TCP Connections</div>
+        <div class="stat-value" id="stat-tcp">0</div>
+        <div class="stat-detail">active tunnels</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">UDP Flows</div>
+        <div class="stat-value" id="stat-udp">0</div>
+        <div class="stat-detail">active sockets</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <h2>Recent Proxies</h2>
+        <button class="btn" id="btn-rotate">Rotate</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Host</th>
+              <th>Port</th>
+              <th>Protocol</th>
+              <th>Latency</th>
+              <th>Score</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="dashboard-proxy-list">
+            <tr><td colspan="7" class="empty">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- Proxies View -->
+  <section id="view-proxies" class="view">
+    <div class="card">
+      <div class="card-header">
+        <h2>All Proxies</h2>
+        <span class="badge" id="proxy-count">0</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Host</th>
+              <th>Port</th>
+              <th>Protocol</th>
+              <th>Anonymity</th>
+              <th>Country</th>
+              <th>Latency</th>
+              <th>Score</th>
+              <th>Active</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="proxy-list">
+            <tr><td colspan="10" class="empty">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- Connections View -->
+  <section id="view-connections" class="view">
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">TCP Connections</div>
+        <div class="stat-value" id="conn-tcp">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">UDP Flows</div>
+        <div class="stat-value" id="conn-udp">0</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- DNS Cache View -->
+  <section id="view-dns" class="view">
+    <div class="card">
+      <div class="card-header">
+        <h2>DNS Cache</h2>
+        <span class="badge" id="dns-count">0</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>IP Address</th>
+              <th>Hostname</th>
+            </tr>
+          </thead>
+          <tbody id="dns-list">
+            <tr><td colspan="2" class="empty">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="/js/app.js"></script>
+</body>
+</html>
