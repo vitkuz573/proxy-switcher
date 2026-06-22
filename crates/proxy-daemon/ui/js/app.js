@@ -18,6 +18,13 @@ function scoreBar(s) {
   return `<span class="score-bar"><span class="score-bar-fill ${scoreCls(s)}" style="width:${pct}%"></span></span>`;
 }
 
+function isHealthy(p) { return p.last_checked != null && p.latency_ms != null; }
+function healthBadge(p) {
+  if (p.last_checked == null) return '<span class="badge unchecked">unchecked</span>';
+  if (p.latency_ms != null) return '<span class="badge" style="background:var(--green);color:#fff">alive</span>';
+  return '<span class="badge dead">dead</span>';
+}
+
 async function fetchJSON(url, opts) {
   try {
     const res = await fetch(url, opts);
@@ -84,10 +91,16 @@ function renderStatus() {
 function renderDashboardProxies() {
   const tbody = $('#dashboard-proxy-list');
   const active = state.status?.active_proxy;
-  const list = state.proxies.slice(0, 10);
+  const healthy = state.proxies.filter(isHealthy);
+  const checking = state.scrapeStatus?.checking_progress;
+  const list = healthy.length > 0 ? healthy.slice(0, 10) : state.proxies.slice(0, 10);
 
   if (list.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="empty">No proxies in pool</td></tr>';
+    if (checking) {
+      tbody.innerHTML = `<tr><td colspan="7" class="empty"><span class="spinner"></span> Health check in progress (${checking[0]}/${checking[1]})</td></tr>`;
+    } else {
+      tbody.innerHTML = '<tr><td colspan="7" class="empty">No proxies in pool</td></tr>';
+    }
   } else {
     tbody.innerHTML = list.map(p => {
       const ia = active && p.id === active.id;
@@ -97,14 +110,21 @@ function renderDashboardProxies() {
         <td>${p.port}</td>
         <td>${p.protocol}</td>
         <td>${fmtLatency(p.latency_ms)}</td>
-        <td>${fmtScore(p.score)} ${scoreBar(p.score)}</td>
-        <td>${ia ? '<span class="badge" style="background:var(--green);color:#fff">active</span>' : `<button class="btn btn-sm btn-green" onclick="switchProxy('${esc(p.id)}')">Use</button>`}</td>
+        <td>${fmtScore(p.score)} ${scoreBar(p.score)} ${healthBadge(p)}</td>
+        <td>${ia ? '<span class="badge" style="background:var(--green);color:#fff">active</span>' : (isHealthy(p) ? `<button class="btn btn-sm btn-green" onclick="switchProxy('${esc(p.id)}')">Use</button>` : '<span class="text-muted">—</span>')}</td>
       </tr>`;
     }).join('');
   }
 
   const ap = state.status?.active_proxy;
-  $('#stat-active-proxy').textContent = ap ? `${ap.host}:${ap.port}` : 'None';
+  const el = $('#stat-active-proxy');
+  if (ap) {
+    el.textContent = `${ap.host}:${ap.port}`;
+    el.className = 'stat-value wrap';
+  } else {
+    el.textContent = 'None';
+    el.className = 'stat-value';
+  }
   $('#stat-active-score').textContent = ap ? `Score: ${fmtScore(ap.score)}` : '';
   if (state.stats) {
     $('#stat-pool-healthy').textContent = state.stats.healthy_count;
@@ -117,7 +137,7 @@ function renderDashboardProxies() {
 function renderProxyTable() {
   const tbody = $('#proxy-list');
   const active = state.status?.active_proxy;
-  const list = state.proxies;
+  const list = state.proxies.slice().sort((a, b) => isHealthy(b) - isHealthy(a));
 
   if (list.length === 0) {
     tbody.innerHTML = '<tr><td colspan="10" class="empty">No proxies</td></tr>';
@@ -133,7 +153,8 @@ function renderProxyTable() {
         <td>${p.country || '—'}</td>
         <td>${fmtLatency(p.latency_ms)}</td>
         <td>${fmtScore(p.score)} ${scoreBar(p.score)}</td>
-        <td>${ia ? '<span class="badge" style="background:var(--green);color:#fff">✓</span>' : `<button class="btn btn-sm btn-green" onclick="switchProxy('${esc(p.id)}')">Use</button>`}</td>
+        <td>${healthBadge(p)}</td>
+        <td>${ia ? '<span class="badge" style="background:var(--green);color:#fff">active</span>' : (isHealthy(p) ? `<button class="btn btn-sm btn-green" onclick="switchProxy('${esc(p.id)}')">Use</button>` : '<span class="text-muted">—</span>')}</td>
         <td><button class="btn btn-sm" style="color:var(--red);border-color:var(--red)" onclick="deleteProxy('${esc(p.id)}')">Del</button></td>
       </tr>`;
     }).join('');
@@ -163,10 +184,15 @@ function renderScraper() {
   if (!state.scrapeStatus) return;
   const s = state.scrapeStatus;
 
+  const checking = s.checking_progress;
+
   // Dashboard scraper panel
   const dash = $('#scraper-status-dash');
   if (s.running) {
-    dash.innerHTML = '<p><span class="spinner"></span> Scraping... <span class="text-muted">(checking proxies...)</span></p>';
+    dash.innerHTML = '<p><span class="spinner"></span> Scraping sources...</p>';
+  } else if (checking) {
+    const pct = checking[1] > 0 ? Math.round(checking[0] / checking[1] * 100) : 0;
+    dash.innerHTML = `<p><span class="spinner"></span> Health check: <strong>${checking[0]}</strong> / <strong>${checking[1]}</strong> (${pct}%)</p>`;
   } else if (s.last_run) {
     const t = new Date(s.last_run).toLocaleTimeString();
     dash.innerHTML = `<p>Last run: <strong>${t}</strong> &mdash; found <strong>${s.proxies_found}</strong> proxies, <strong>${s.healthy_count}</strong> alive${s.errors.length ? ', <span style="color:var(--red)">' + s.errors.length + ' errors</span>' : ''}</p>`;
@@ -175,7 +201,10 @@ function renderScraper() {
   // Scraper page
   const full = $('#scraper-status-full');
   if (s.running) {
-    full.innerHTML = '<p><span class="spinner"></span> Scrape in progress... checking proxy health...</p>';
+    full.innerHTML = '<p><span class="spinner"></span> Scraping sources...</p>';
+  } else if (checking) {
+    const pct = checking[1] > 0 ? Math.round(checking[0] / checking[1] * 100) : 0;
+    full.innerHTML = `<p><span class="spinner"></span> Checking proxy health: <strong>${checking[0]}</strong> / <strong>${checking[1]}</strong> (${pct}%) &mdash; pool has proxies but health check running</p>`;
   } else if (s.last_run) {
     const t = new Date(s.last_run).toLocaleString();
     full.innerHTML = `<table class="kv"><tr><td>Last run</td><td>${t}</td></tr>
@@ -210,7 +239,7 @@ function renderScraper() {
 // ── Actions ────────────────────────────────────────────────────────────
 
 async function switchProxy(id) {
-  const d = await fetchJSON(`${API}/proxies/${encodeURIComponent(id)}/switch`, { method: 'POST' });
+  const d = await fetchJSON(`${API}/switch?id=${encodeURIComponent(id)}`, { method: 'POST' });
   if (d) {
     state.status = { ...state.status, active_proxy: d };
     await loadProxies();

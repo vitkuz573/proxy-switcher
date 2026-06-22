@@ -4,7 +4,8 @@ services:
     image: proxy-switcher:latest
     container_name: proxy-switcher
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "9090:9090"
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
@@ -16,7 +17,7 @@ services:
     environment:
       - RUST_LOG=proxy=info
     logging:
-      driver: journald
+      driver: json-file
       options:
         tag: proxy-switcher
 

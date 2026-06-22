@@ -1,5 +1,5 @@
 [daemon]
-api_host = "127.0.0.1"
+api_host = "0.0.0.0"
 api_port = 9090
 data_dir = "/var/lib/proxy-switcher"
 ui_dir = "/usr/share/proxy-switcher/ui"
@@ -16,8 +16,8 @@ interval_secs = 300
 sources = []
 
 [health]
-concurrency = 20
-timeout_secs = 10
+concurrency = 500
+timeout_secs = 5
 check_interval_secs = 60
 target_url = "http://httpbin.org/ip"
 

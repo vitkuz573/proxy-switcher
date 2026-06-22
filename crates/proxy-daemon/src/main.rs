@@ -90,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
         last_run: None,
         proxies_found: 0,
         healthy_count: 0,
+        checking_progress: None,
         errors: Vec::new(),
     }));
 
@@ -130,20 +131,44 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
 
-                info!("Auto scrape: {} proxies, running health check...", proxies.len());
-                let results = health_clone.check_batch(&proxies).await;
-                let healthy_count = results.iter().filter(|r| r.alive).count();
-                pool_clone.apply_health_results(results).await;
-
                 {
                     let mut s = scrape_state_clone.write().await;
                     s.running = false;
                     s.last_run = Some(chrono::Utc::now());
                     s.proxies_found = proxies.len();
-                    s.healthy_count = healthy_count;
                 }
 
-                info!("Auto scrape done: {healthy_count} alive, {} in pool", pool_clone.all().await.len());
+                info!("Auto scrape: {} proxies, running health check...", proxies.len());
+
+                {
+                    let mut with_score = proxies.clone();
+                    for p in &mut with_score {
+                        if p.score == 0.0 {
+                            p.score = 50.0;
+                        }
+                    }
+                    pool_clone.update(with_score).await;
+                }
+                info!("Auto scrape done: {} in pool", pool_clone.all().await.len());
+
+                {
+                    let mut s = scrape_state_clone.write().await;
+                    s.checking_progress = Some((0, proxies.len()));
+                }
+
+                let hc = health_clone.clone();
+                let pc = pool_clone.clone();
+                let sc = scrape_state_clone.clone();
+                let total = proxies.len();
+                tokio::spawn(async move {
+                    let results = hc.check_batch(&proxies).await;
+                    let healthy_count = results.iter().filter(|r| r.alive).count();
+                    pc.apply_health_results(results).await;
+                    let mut s = sc.write().await;
+                    s.checking_progress = None;
+                    s.healthy_count = healthy_count;
+                    info!("Health check done: {healthy_count} alive from {total}");
+                });
 
                 tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
             }

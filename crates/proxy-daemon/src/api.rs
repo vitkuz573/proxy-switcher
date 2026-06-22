@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::StatusCode,
     response::{Html, IntoResponse, Json, Response},
     routing::{delete, get, post},
@@ -21,6 +21,7 @@ pub struct ScrapeState {
     pub last_run: Option<DateTime<Utc>>,
     pub proxies_found: usize,
     pub healthy_count: usize,
+    pub checking_progress: Option<(usize, usize)>, // (checked, total)
     pub errors: Vec<String>,
 }
 
@@ -40,7 +41,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/status", get(get_status))
         .route("/api/v1/proxies", get(list_proxies).post(add_proxy))
         .route("/api/v1/proxies/{id}", delete(delete_proxy))
-        .route("/api/v1/proxies/{id}/switch", post(switch_proxy))
+        .route("/api/v1/switch", post(switch_proxy))
         .route("/api/v1/rotate", post(rotate_proxy))
         .route("/api/v1/stats", get(get_stats))
         .route("/api/v1/dns", get(get_dns))
@@ -162,13 +163,18 @@ async fn delete_proxy(
     }
 }
 
+#[derive(Deserialize)]
+struct SwitchQuery {
+    id: String,
+}
+
 async fn switch_proxy(
     axum::extract::State(state): axum::extract::State<AppState>,
-    Path(id): Path<String>,
+    Query(q): Query<SwitchQuery>,
 ) -> Result<Json<ProxyInfo>, StatusCode> {
     state
         .pool
-        .set_active(&id)
+        .set_active(&q.id)
         .await
         .ok_or(StatusCode::NOT_FOUND)
         .map(Json)
@@ -242,6 +248,7 @@ struct ScrapeStatusResponse {
     last_run: Option<DateTime<Utc>>,
     proxies_found: usize,
     healthy_count: usize,
+    checking_progress: Option<(usize, usize)>,
     errors: Vec<String>,
 }
 
@@ -301,6 +308,7 @@ async fn scrape_status(
         last_run: s.last_run,
         proxies_found: s.proxies_found,
         healthy_count: s.healthy_count,
+        checking_progress: s.checking_progress,
         errors: s.errors.clone(),
     })
 }
