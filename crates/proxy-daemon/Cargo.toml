@@ -16,6 +16,9 @@ clap.workspace = true
 axum.workspace = true
 toml.workspace = true
 
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
 # Static file serving
 tower-http = { version = "0.6", features = ["fs", "cors"] }
 

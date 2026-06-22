@@ -12,6 +12,7 @@
   <ul class="nav-links">
     <li><a href="#" data-view="dashboard" class="active">Dashboard</a></li>
     <li><a href="#" data-view="proxies">Proxies</a></li>
+    <li><a href="#" data-view="scraper">Scraper</a></li>
     <li><a href="#" data-view="connections">Connections</a></li>
     <li><a href="#" data-view="dns">DNS Cache</a></li>
   </ul>
@@ -37,12 +38,12 @@
         <div class="stat-detail">healthy / total</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">TCP Connections</div>
+        <div class="stat-label">TCP</div>
         <div class="stat-value" id="stat-tcp">0</div>
         <div class="stat-detail">active tunnels</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">UDP Flows</div>
+        <div class="stat-label">UDP</div>
         <div class="stat-value" id="stat-udp">0</div>
         <div class="stat-detail">active sockets</div>
       </div>
@@ -51,25 +52,30 @@
     <div class="card">
       <div class="card-header">
         <h2>Recent Proxies</h2>
-        <button class="btn" id="btn-rotate">Rotate</button>
+        <div class="hdr-actions">
+          <button class="btn" onclick="showAddModal()">+ Add</button>
+          <button class="btn" id="btn-rotate">Rotate</button>
+        </div>
       </div>
       <div class="table-wrap">
         <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Host</th>
-              <th>Port</th>
-              <th>Protocol</th>
-              <th>Latency</th>
-              <th>Score</th>
-              <th>Action</th>
-            </tr>
-          </thead>
+          <thead><tr>
+            <th>ID</th><th>Host</th><th>Port</th><th>Proto</th><th>Latency</th><th>Score</th><th></th>
+          </tr></thead>
           <tbody id="dashboard-proxy-list">
             <tr><td colspan="7" class="empty">Loading...</td></tr>
           </tbody>
         </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <h2>Scraper</h2>
+        <button class="btn" id="btn-scrape" onclick="triggerScrape()">Run Scrape</button>
+      </div>
+      <div class="card-body" id="scraper-status-dash">
+        <p class="text-muted">Not run yet</p>
       </div>
     </div>
   </section>
@@ -79,26 +85,44 @@
     <div class="card">
       <div class="card-header">
         <h2>All Proxies</h2>
-        <span class="badge" id="proxy-count">0</span>
+        <div class="hdr-actions">
+          <span class="badge" id="proxy-count">0</span>
+          <button class="btn" onclick="showAddModal()">+ Add</button>
+        </div>
       </div>
       <div class="table-wrap">
         <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Host</th>
-              <th>Port</th>
-              <th>Protocol</th>
-              <th>Anonymity</th>
-              <th>Country</th>
-              <th>Latency</th>
-              <th>Score</th>
-              <th>Active</th>
-              <th>Action</th>
-            </tr>
-          </thead>
+          <thead><tr>
+            <th>ID</th><th>Host</th><th>Port</th><th>Proto</th><th>Anonymity</th><th>Country</th><th>Latency</th><th>Score</th><th>Active</th><th></th>
+          </tr></thead>
           <tbody id="proxy-list">
             <tr><td colspan="10" class="empty">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- Scraper View -->
+  <section id="view-scraper" class="view">
+    <div class="card">
+      <div class="card-header">
+        <h2>Scraper Controls</h2>
+        <button class="btn btn-primary" id="btn-scrape-full" onclick="triggerScrape()">Run Scrape</button>
+      </div>
+      <div class="card-body" id="scraper-status-full">
+        <p class="text-muted">Not run yet</p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><h2>Scrape History</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Time</th><th>Found</th><th>Healthy</th><th>Errors</th>
+          </tr></thead>
+          <tbody id="scrape-history">
+            <tr><td colspan="4" class="empty">No data</td></tr>
           </tbody>
         </table>
       </div>
@@ -108,40 +132,53 @@
   <!-- Connections View -->
   <section id="view-connections" class="view">
     <div class="stats-grid">
-      <div class="stat-card">
-        <div class="stat-label">TCP Connections</div>
-        <div class="stat-value" id="conn-tcp">0</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">UDP Flows</div>
-        <div class="stat-value" id="conn-udp">0</div>
-      </div>
+      <div class="stat-card"><div class="stat-label">TCP</div><div class="stat-value" id="conn-tcp">0</div></div>
+      <div class="stat-card"><div class="stat-label">UDP</div><div class="stat-value" id="conn-udp">0</div></div>
     </div>
   </section>
 
   <!-- DNS Cache View -->
   <section id="view-dns" class="view">
     <div class="card">
-      <div class="card-header">
-        <h2>DNS Cache</h2>
-        <span class="badge" id="dns-count">0</span>
-      </div>
+      <div class="card-header"><h2>DNS Cache</h2><span class="badge" id="dns-count">0</span></div>
       <div class="table-wrap">
         <table>
-          <thead>
-            <tr>
-              <th>IP Address</th>
-              <th>Hostname</th>
-            </tr>
-          </thead>
-          <tbody id="dns-list">
-            <tr><td colspan="2" class="empty">Loading...</td></tr>
-          </tbody>
+          <thead><tr><th>IP</th><th>Hostname</th></tr></thead>
+          <tbody id="dns-list"><tr><td colspan="2" class="empty">Loading...</td></tr></tbody>
         </table>
       </div>
     </div>
   </section>
 </main>
+
+<!-- Add Proxy Modal -->
+<div class="modal-overlay" id="add-modal" style="display:none" onclick="if(event.target===this)closeAddModal()">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Add Proxy</h2>
+      <button class="btn-close" onclick="closeAddModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <label>Host</label>
+      <input type="text" id="add-host" placeholder="192.168.1.1 or proxy.example.com">
+      <label>Port</label>
+      <input type="number" id="add-port" placeholder="3128">
+      <label>Protocol</label>
+      <select id="add-proto">
+        <option value="http">HTTP</option>
+        <option value="https">HTTPS</option>
+        <option value="socks5">SOCKS5</option>
+        <option value="socks4">SOCKS4</option>
+      </select>
+      <label>Country (optional)</label>
+      <input type="text" id="add-country" placeholder="US">
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeAddModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="submitAddProxy()">Add</button>
+    </div>
+  </div>
+</div>
 
 <script src="/js/app.js"></script>
 </body>

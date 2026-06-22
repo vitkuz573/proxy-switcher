@@ -120,4 +120,31 @@ impl ProxyPool {
         inner.active_index = Some(next);
         Some(inner.proxies[next].clone())
     }
+
+    pub async fn add(&self, proxy: ProxyInfo) {
+        let mut inner = self.inner.write().await;
+        if let Some(existing) = inner.proxies.iter_mut().find(|p| p.id == proxy.id) {
+            *existing = proxy;
+        } else {
+            inner.proxies.push(proxy);
+        }
+    }
+
+    pub async fn remove(&self, id: &str) -> bool {
+        let mut inner = self.inner.write().await;
+        let pos = inner.proxies.iter().position(|p| p.id == id);
+        if let Some(idx) = pos {
+            inner.proxies.remove(idx);
+            if let Some(active) = inner.active_index {
+                if active == idx {
+                    inner.active_index = if inner.proxies.is_empty() { None } else { Some(0) };
+                } else if active > idx {
+                    inner.active_index = Some(active - 1);
+                }
+            }
+            true
+        } else {
+            false
+        }
+    }
 }

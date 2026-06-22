@@ -11,6 +11,7 @@ use proxy_core::storage::Storage;
 use proxy_core::tun_manager::{run_forwarding_loop, TunManager};
 use std::sync::Arc;
 use tokio::signal;
+use tokio::sync::RwLock;
 use tracing::{error, info};
 
 #[derive(Parser)]
@@ -81,45 +82,67 @@ async fn main() -> anyhow::Result<()> {
         config.health.target_url.clone(),
     ));
 
-    // Scraper + health check loop
+    // Shared state for API
+    let scraper = Arc::new(Scraper::new(config.scraper.sources.clone()));
+    let scrape_state = Arc::new(RwLock::new(api::ScrapeState {
+        running: false,
+        last_run: None,
+        proxies_found: 0,
+        healthy_count: 0,
+        errors: Vec::new(),
+    }));
+
+    let app_state = api::AppState {
+        pool: pool.clone(),
+        router: router.clone(),
+        scraper: scraper.clone(),
+        health: health.clone(),
+        scrape_state: scrape_state.clone(),
+    };
+
+    // Automatic scrape loop
     if config.scraper.enabled {
         let pool_clone = pool.clone();
         let health_clone = health.clone();
-        let scraper_config = config.scraper.clone();
+        let scraper_clone = scraper.clone();
+        let scrape_state_clone = scrape_state.clone();
+        let interval = config.scraper.interval_secs;
 
         tokio::spawn(async move {
-            let scraper = Scraper::new(scraper_config.sources);
-
             loop {
-                // 1. Scrape proxies from all sources
-                let proxies = match scraper.scrape_all().await {
+                let mut s = scrape_state_clone.write().await;
+                s.running = true;
+                s.errors.clear();
+                drop(s);
+
+                let proxies = match scraper_clone.scrape_all().await {
                     Ok(p) => p,
                     Err(e) => {
-                        error!("Scrape cycle failed: {e}");
+                        error!("Auto scrape cycle failed: {e}");
+                        let mut s = scrape_state_clone.write().await;
+                        s.running = false;
+                        s.errors.push(format!("{e}"));
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                         continue;
                     }
                 };
 
-                info!("Scraped {} proxies, running health check...", proxies.len());
-
-                // 2. Health check all newly scraped proxies
+                info!("Auto scrape: {} proxies, running health check...", proxies.len());
                 let results = health_clone.check_batch(&proxies).await;
-
-                // 3. Update pool with only healthy proxies
+                let healthy_count = results.iter().filter(|r| r.alive).count();
                 pool_clone.apply_health_results(results).await;
 
-                let healthy = pool_clone.healthy_count().await;
-                info!(
-                    "Cycle complete: {} alive, {} in pool",
-                    healthy,
-                    pool_clone.all().await.len()
-                );
+                {
+                    let mut s = scrape_state_clone.write().await;
+                    s.running = false;
+                    s.last_run = Some(chrono::Utc::now());
+                    s.proxies_found = proxies.len();
+                    s.healthy_count = healthy_count;
+                }
 
-                tokio::time::sleep(std::time::Duration::from_secs(
-                    scraper_config.interval_secs,
-                ))
-                .await;
+                info!("Auto scrape done: {healthy_count} alive, {} in pool", pool_clone.all().await.len());
+
+                tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
             }
         });
     }
@@ -154,7 +177,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Start API server
     let addr = format!("{}:{}", config.daemon.api_host, config.daemon.api_port);
-    let router = api::build_router(pool.clone(), router.clone());
+    let router = api::build_router(app_state);
 
     info!("Starting API server on {addr}");
     let listener = tokio::net::TcpListener::bind(&addr)

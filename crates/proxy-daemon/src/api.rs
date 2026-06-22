@@ -2,24 +2,48 @@ use axum::{
     extract::{Path, Request},
     http::StatusCode,
     response::{Html, IntoResponse, Json, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
+use tracing::{error, info};
+use chrono::{DateTime, Utc};
+use proxy_core::health::HealthChecker;
 use proxy_core::pool::ProxyPool;
+use proxy_core::proxy::{Anonymity, ProxyInfo, ProxyProtocol};
 use proxy_core::router::Router as ProxyRouter;
-use serde::Serialize;
+use proxy_core::scraper::Scraper;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
-pub fn build_router(pool: Arc<ProxyPool>, router: Arc<ProxyRouter>) -> Router {
-    let state = AppState { pool, router };
+pub struct ScrapeState {
+    pub running: bool,
+    pub last_run: Option<DateTime<Utc>>,
+    pub proxies_found: usize,
+    pub healthy_count: usize,
+    pub errors: Vec<String>,
+}
 
+#[derive(Clone)]
+pub struct AppState {
+    pub pool: Arc<ProxyPool>,
+    pub router: Arc<ProxyRouter>,
+    pub scraper: Arc<Scraper>,
+    pub health: Arc<HealthChecker>,
+    pub scrape_state: Arc<RwLock<ScrapeState>>,
+}
+
+pub fn build_router(state: AppState) -> Router {
     let api = Router::new()
         .route("/api/v1/status", get(get_status))
-        .route("/api/v1/proxies", get(list_proxies))
+        .route("/api/v1/proxies", get(list_proxies).post(add_proxy))
+        .route("/api/v1/proxies/{id}", delete(delete_proxy))
         .route("/api/v1/proxies/{id}/switch", post(switch_proxy))
         .route("/api/v1/rotate", post(rotate_proxy))
         .route("/api/v1/stats", get(get_stats))
         .route("/api/v1/dns", get(get_dns))
+        .route("/api/v1/scrape", post(trigger_scrape))
+        .route("/api/v1/scrape/status", get(scrape_status))
         .with_state(state);
 
     Router::new()
@@ -58,47 +82,89 @@ async fn ui_handler(req: Request) -> Response {
             .unwrap();
     }
 
-    // SPA fallback: always serve index.html
     match tokio::fs::read_to_string(ui_path.join("index.html")).await {
         Ok(html) => Html(html).into_response(),
         Err(_) => (StatusCode::NOT_FOUND, "Not Found").into_response(),
     }
 }
 
-#[derive(Clone)]
-struct AppState {
-    pool: Arc<ProxyPool>,
-    router: Arc<ProxyRouter>,
-}
+// ── Status ────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
 struct StatusResponse {
-    active_proxy: Option<proxy_core::proxy::ProxyInfo>,
+    active_proxy: Option<ProxyInfo>,
     pool_size: usize,
 }
 
 async fn get_status(
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> Result<Json<StatusResponse>, StatusCode> {
+) -> Json<StatusResponse> {
     let active = state.pool.active().await;
     let all = state.pool.all().await;
-    Ok(Json(StatusResponse {
+    Json(StatusResponse {
         active_proxy: active,
         pool_size: all.len(),
-    }))
+    })
 }
+
+// ── Proxies CRUD ──────────────────────────────────────────────────────
 
 async fn list_proxies(
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> Result<Json<Vec<proxy_core::proxy::ProxyInfo>>, StatusCode> {
-    let proxies = state.pool.all().await;
-    Ok(Json(proxies))
+) -> Json<Vec<ProxyInfo>> {
+    Json(state.pool.all().await)
+}
+
+#[derive(Deserialize)]
+struct AddProxyInput {
+    host: String,
+    port: u16,
+    protocol: Option<String>,
+    country: Option<String>,
+}
+
+async fn add_proxy(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Json(input): axum::extract::Json<AddProxyInput>,
+) -> StatusCode {
+    let protocol = match input.protocol.as_deref() {
+        Some("socks5") => ProxyProtocol::Socks5,
+        Some("socks4") => ProxyProtocol::Socks4,
+        Some("https") => ProxyProtocol::Https,
+        _ => ProxyProtocol::Http,
+    };
+
+    let proxy = ProxyInfo {
+        id: format!("{}:{}", input.host, input.port),
+        host: input.host,
+        port: input.port,
+        protocol,
+        anonymity: Anonymity::Unknown,
+        latency_ms: None,
+        country: input.country,
+        last_checked: None,
+        score: 0.0,
+    };
+
+    state.pool.add(proxy).await;
+    StatusCode::CREATED
+}
+
+async fn delete_proxy(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Path(id): Path<String>,
+) -> StatusCode {
+    if state.pool.remove(&id).await {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
 }
 
 async fn switch_proxy(
     axum::extract::State(state): axum::extract::State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<proxy_core::proxy::ProxyInfo>, StatusCode> {
+) -> Result<Json<ProxyInfo>, StatusCode> {
     state
         .pool
         .set_active(&id)
@@ -109,7 +175,7 @@ async fn switch_proxy(
 
 async fn rotate_proxy(
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> Result<Json<proxy_core::proxy::ProxyInfo>, StatusCode> {
+) -> Result<Json<ProxyInfo>, StatusCode> {
     state
         .pool
         .rotate()
@@ -117,6 +183,8 @@ async fn rotate_proxy(
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)
         .map(Json)
 }
+
+// ── Stats ─────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
 struct StatsResponse {
@@ -142,6 +210,8 @@ async fn get_stats(
     })
 }
 
+// ── DNS ───────────────────────────────────────────────────────────────
+
 #[derive(Serialize)]
 struct DnsEntry {
     ip: String,
@@ -161,4 +231,75 @@ async fn get_dns(
             })
             .collect(),
     )
+}
+
+// ── Scrape ────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct ScrapeStatusResponse {
+    running: bool,
+    last_run: Option<DateTime<Utc>>,
+    proxies_found: usize,
+    healthy_count: usize,
+    errors: Vec<String>,
+}
+
+async fn trigger_scrape(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> StatusCode {
+    let running = state.scrape_state.read().await.running;
+    if running {
+        return StatusCode::CONFLICT;
+    }
+
+    let pool = state.pool.clone();
+    let scraper = state.scraper.clone();
+    let health = state.health.clone();
+    let scrape_state = state.scrape_state.clone();
+
+    tokio::spawn(async move {
+        let mut s = scrape_state.write().await;
+        s.running = true;
+        s.errors.clear();
+        drop(s);
+
+        match scraper.scrape_all().await {
+            Ok(p) => {
+                let count = p.len();
+                info!("Scrape: collected {count} proxies, running health check...");
+
+                let results = health.check_batch(&p).await;
+                let healthy_count = results.iter().filter(|r| r.alive).count();
+                pool.apply_health_results(results).await;
+
+                let mut s = scrape_state.write().await;
+                s.running = false;
+                s.last_run = Some(Utc::now());
+                s.proxies_found = count;
+                s.healthy_count = healthy_count;
+            }
+            Err(e) => {
+                let msg = format!("{e}");
+                error!("Scrape failed: {msg}");
+                let mut s = scrape_state.write().await;
+                s.running = false;
+                s.errors.push(msg);
+            }
+        };
+    });
+
+    StatusCode::ACCEPTED
+}
+
+async fn scrape_status(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Json<ScrapeStatusResponse> {
+    let s = state.scrape_state.read().await;
+    Json(ScrapeStatusResponse {
+        running: s.running,
+        last_run: s.last_run,
+        proxies_found: s.proxies_found,
+        healthy_count: s.healthy_count,
+        errors: s.errors.clone(),
+    })
 }

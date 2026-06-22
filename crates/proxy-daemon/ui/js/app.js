@@ -1,6 +1,6 @@
 const API = '/api/v1';
 
-let state = { status: null, proxies: [], stats: null };
+let state = { status: null, proxies: [], stats: null, scrapeStatus: null };
 
 function $(sel, ctx) { return (ctx || document).querySelector(sel); }
 function $$(sel, ctx) { return Array.from((ctx || document).querySelectorAll(sel)); }
@@ -11,55 +11,38 @@ function fmtLatency(ms) {
   return (ms / 1000).toFixed(1) + 's';
 }
 
-function fmtScore(score) {
-  return score != null ? score.toFixed(1) : '—';
+function fmtScore(s) { return s != null ? s.toFixed(1) : '—'; }
+function scoreCls(s) { return s == null ? '' : s >= 50 ? 'score-high' : s >= 20 ? 'score-mid' : 'score-low'; }
+function scoreBar(s) {
+  const pct = s != null ? Math.min(s, 100) : 0;
+  return `<span class="score-bar"><span class="score-bar-fill ${scoreCls(s)}" style="width:${pct}%"></span></span>`;
 }
 
-function scoreClass(score) {
-  if (score == null) return '';
-  if (score >= 50) return 'score-high';
-  if (score >= 20) return 'score-mid';
-  return 'score-low';
-}
-
-function scoreBar(score) {
-  const pct = score != null ? Math.min(score, 100) : 0;
-  const cls = scoreClass(score);
-  return `<span class="score-bar"><span class="score-bar-fill ${cls}" style="width:${pct}%"></span></span>`;
-}
-
-async function fetchJSON(url) {
+async function fetchJSON(url, opts) {
   try {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(res.statusText);
+    const res = await fetch(url, opts);
+    if (res.status === 204 || res.status === 202) return { _status: res.status };
+    if (!res.ok) return null;
     return await res.json();
   } catch (e) {
-    console.error('fetch failed:', url, e);
+    console.error('fetch:', url, e);
     return null;
   }
 }
 
-async function loadStatus() {
-  const data = await fetchJSON(API + '/status');
-  if (data) state.status = data;
-}
+// ── Load ──────────────────────────────────────────────────────────────
 
-async function loadProxies() {
-  const data = await fetchJSON(API + '/proxies');
-  if (data) state.proxies = data;
-}
-
-async function loadStats() {
-  const data = await fetchJSON(API + '/stats');
-  if (data) state.stats = data;
-}
+async function loadStatus() { const d = await fetchJSON(API + '/status'); if (d) state.status = d; }
+async function loadProxies() { const d = await fetchJSON(API + '/proxies'); if (d) state.proxies = d; }
+async function loadStats() { const d = await fetchJSON(API + '/stats'); if (d) state.stats = d; }
+async function loadScrapeStatus() { const d = await fetchJSON(API + '/scrape/status'); if (d) state.scrapeStatus = d; }
 
 async function refresh() {
-  await Promise.all([loadStatus(), loadProxies(), loadStats()]);
+  await Promise.all([loadStatus(), loadProxies(), loadStats(), loadScrapeStatus()]);
   renderAll();
 }
 
-// ── Navigation ──────────────────────────────────────────────────────────
+// ── Navigation ────────────────────────────────────────────────────────
 
 $$('.nav-links a').forEach(a => {
   a.addEventListener('click', e => {
@@ -67,13 +50,15 @@ $$('.nav-links a').forEach(a => {
     $$('.nav-links a').forEach(x => x.classList.remove('active'));
     a.classList.add('active');
     $$('.view').forEach(v => v.classList.remove('active'));
-    const view = document.getElementById('view-' + a.dataset.view);
-    if (view) view.classList.add('active');
+    const v = document.getElementById('view-' + a.dataset.view);
+    if (v) v.classList.add('active');
     $('#view-title').textContent = a.textContent.trim();
+    // Refresh scrapes when switching to scraper tab
+    if (a.dataset.view === 'scraper') renderScraper();
   });
 });
 
-// ── Render ──────────────────────────────────────────────────────────────
+// ── Render ────────────────────────────────────────────────────────────
 
 function renderAll() {
   renderStatus();
@@ -81,48 +66,45 @@ function renderAll() {
   renderProxyTable();
   renderConnections();
   renderDns();
+  renderScraper();
 }
 
 function renderStatus() {
-  const badge = $('#status-badge');
+  const b = $('#status-badge');
   if (state.stats) {
-    badge.textContent = 'Online';
-    badge.className = 'status-badge';
+    b.textContent = 'Online';
+    b.className = 'status-badge';
   } else {
-    badge.textContent = 'Offline';
-    badge.className = 'status-badge offline';
+    b.textContent = 'Offline';
+    b.className = 'status-badge offline';
   }
 }
 
 function renderDashboardProxies() {
   const tbody = $('#dashboard-proxy-list');
   const active = state.status?.active_proxy;
-  const proxies = state.proxies.slice(0, 10);
+  const list = state.proxies.slice(0, 10);
 
-  if (proxies.length === 0) {
+  if (list.length === 0) {
     tbody.innerHTML = '<tr><td colspan="7" class="empty">No proxies in pool</td></tr>';
-    return;
+  } else {
+    tbody.innerHTML = list.map(p => {
+      const ia = active && p.id === active.id;
+      return `<tr${ia ? ' class="active"' : ''}>
+        <td><code>${esc(p.id)}</code></td>
+        <td>${esc(p.host)}</td>
+        <td>${p.port}</td>
+        <td>${p.protocol}</td>
+        <td>${fmtLatency(p.latency_ms)}</td>
+        <td>${fmtScore(p.score)} ${scoreBar(p.score)}</td>
+        <td>${ia ? '<span class="badge" style="background:var(--green);color:#fff">active</span>' : `<button class="btn btn-sm btn-green" onclick="switchProxy('${esc(p.id)}')">Use</button>`}</td>
+      </tr>`;
+    }).join('');
   }
 
-  tbody.innerHTML = proxies.map(p => {
-    const isActive = active && p.id === active.id;
-    const cls = isActive ? ' class="active"' : '';
-    return `<tr${cls}>
-      <td><code>${esc(p.id)}</code></td>
-      <td>${esc(p.host)}</td>
-      <td>${p.port}</td>
-      <td>${p.protocol}</td>
-      <td>${fmtLatency(p.latency_ms)}</td>
-      <td>${fmtScore(p.score)} ${scoreBar(p.score)}</td>
-      <td>${isActive ? '<span class="badge" style="background:var(--green);color:#fff">active</span>' : `<button class="btn btn-sm btn-green" onclick="switchProxy('${esc(p.id)}')">Switch</button>`}</td>
-    </tr>`;
-  }).join('');
-
-  // Dashboard summary
-  const activeProxy = state.status?.active_proxy;
-  $('#stat-active-proxy').textContent = activeProxy ? `${activeProxy.host}:${activeProxy.port}` : 'None';
-  $('#stat-active-score').textContent = activeProxy ? `Score: ${fmtScore(activeProxy.score)}` : '';
-
+  const ap = state.status?.active_proxy;
+  $('#stat-active-proxy').textContent = ap ? `${ap.host}:${ap.port}` : 'None';
+  $('#stat-active-score').textContent = ap ? `Score: ${fmtScore(ap.score)}` : '';
   if (state.stats) {
     $('#stat-pool-healthy').textContent = state.stats.healthy_count;
     $('#stat-pool-total').textContent = state.proxies.length;
@@ -134,31 +116,28 @@ function renderDashboardProxies() {
 function renderProxyTable() {
   const tbody = $('#proxy-list');
   const active = state.status?.active_proxy;
-  const proxies = state.proxies;
+  const list = state.proxies;
 
-  if (proxies.length === 0) {
+  if (list.length === 0) {
     tbody.innerHTML = '<tr><td colspan="10" class="empty">No proxies</td></tr>';
-    return;
+  } else {
+    tbody.innerHTML = list.map(p => {
+      const ia = active && p.id === active.id;
+      return `<tr${ia ? ' class="active"' : ''}>
+        <td><code>${esc(p.id)}</code></td>
+        <td>${esc(p.host)}</td>
+        <td>${p.port}</td>
+        <td>${p.protocol}</td>
+        <td>${p.anonymity}</td>
+        <td>${p.country || '—'}</td>
+        <td>${fmtLatency(p.latency_ms)}</td>
+        <td>${fmtScore(p.score)} ${scoreBar(p.score)}</td>
+        <td>${ia ? '<span class="badge" style="background:var(--green);color:#fff">✓</span>' : `<button class="btn btn-sm btn-green" onclick="switchProxy('${esc(p.id)}')">Use</button>`}</td>
+        <td><button class="btn btn-sm" style="color:var(--red);border-color:var(--red)" onclick="deleteProxy('${esc(p.id)}')">Del</button></td>
+      </tr>`;
+    }).join('');
   }
-
-  tbody.innerHTML = proxies.map(p => {
-    const isActive = active && p.id === active.id;
-    const cls = isActive ? ' class="active"' : '';
-    return `<tr${cls}>
-      <td><code>${esc(p.id)}</code></td>
-      <td>${esc(p.host)}</td>
-      <td>${p.port}</td>
-      <td>${p.protocol}</td>
-      <td>${p.anonymity}</td>
-      <td>${p.country || '—'}</td>
-      <td>${fmtLatency(p.latency_ms)}</td>
-      <td>${fmtScore(p.score)} ${scoreBar(p.score)}</td>
-      <td>${isActive ? '<span class="badge" style="background:var(--green);color:#fff">✓</span>' : '—'}</td>
-      <td>${isActive ? '—' : `<button class="btn btn-sm btn-green" onclick="switchProxy('${esc(p.id)}')">Switch</button>`}</td>
-    </tr>`;
-  }).join('');
-
-  $('#proxy-count').textContent = proxies.length;
+  $('#proxy-count').textContent = list.length;
 }
 
 function renderConnections() {
@@ -170,46 +149,120 @@ function renderConnections() {
 async function renderDns() {
   const tbody = $('#dns-list');
   const entries = await fetchJSON(API + '/dns');
-
   if (!entries || entries.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="2" class="empty">No cached DNS entries</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="2" class="empty">No cached entries</td></tr>';
     $('#dns-count').textContent = '0';
     return;
   }
-
   $('#dns-count').textContent = entries.length;
-  tbody.innerHTML = entries.map(e =>
-    `<tr><td><code>${esc(e.ip)}</code></td><td>${esc(e.hostname)}</td></tr>`
-  ).join('');
+  tbody.innerHTML = entries.map(e => `<tr><td><code>${esc(e.ip)}</code></td><td>${esc(e.hostname)}</td></tr>`).join('');
 }
 
-// Refresh status for active proxy indicator
-function startPolling() {
-  refresh();
-  setInterval(refresh, 3000);
+function renderScraper() {
+  if (!state.scrapeStatus) return;
+  const s = state.scrapeStatus;
+
+  // Dashboard scraper panel
+  const dash = $('#scraper-status-dash');
+  if (s.running) {
+    dash.innerHTML = '<p><span class="spinner"></span> Scraping... <span class="text-muted">(checking proxies...)</span></p>';
+  } else if (s.last_run) {
+    const t = new Date(s.last_run).toLocaleTimeString();
+    dash.innerHTML = `<p>Last run: <strong>${t}</strong> &mdash; found <strong>${s.proxies_found}</strong> proxies, <strong>${s.healthy_count}</strong> alive${s.errors.length ? ', <span style="color:var(--red)">' + s.errors.length + ' errors</span>' : ''}</p>`;
+  }
+
+  // Scraper page
+  const full = $('#scraper-status-full');
+  if (s.running) {
+    full.innerHTML = '<p><span class="spinner"></span> Scrape in progress... checking proxy health...</p>';
+  } else if (s.last_run) {
+    const t = new Date(s.last_run).toLocaleString();
+    full.innerHTML = `<table class="kv"><tr><td>Last run</td><td>${t}</td></tr>
+      <tr><td>Proxies found</td><td><strong>${s.proxies_found}</strong></td></tr>
+      <tr><td>Healthy</td><td><strong>${s.healthy_count}</strong></td></tr>
+      <tr><td>Errors</td><td>${s.errors.length ? '<span style="color:var(--red)">' + esc(s.errors.join('; ')) + '</span>' : 'none'}</td></tr></table>`;
+  }
+
+  // Scrape history
+  const hist = $('#scrape-history');
+  if (s.last_run) {
+    hist.innerHTML = `<tr>
+      <td>${new Date(s.last_run).toLocaleString()}</td>
+      <td>${s.proxies_found}</td>
+      <td>${s.healthy_count}</td>
+      <td>${s.errors.length ? '<span style="color:var(--red)">' + esc(s.errors.join('; ')) + '</span>' : '—'}</td>
+    </tr>`;
+  }
 }
 
-// ── Actions ─────────────────────────────────────────────────────────────
+// ── Actions ────────────────────────────────────────────────────────────
 
 async function switchProxy(id) {
-  const data = await fetchJSON(`${API}/proxies/${encodeURIComponent(id)}/switch`);
-  if (data) {
-    state.status = { ...state.status, active_proxy: data };
+  const d = await fetchJSON(`${API}/proxies/${encodeURIComponent(id)}/switch`, { method: 'POST' });
+  if (d) {
+    state.status = { ...state.status, active_proxy: d };
     await loadProxies();
     renderAll();
   }
 }
 
-async function rotateProxy() {
-  const data = await fetchJSON(`${API}/rotate`);
-  if (data) {
-    state.status = { ...state.status, active_proxy: data };
+async function deleteProxy(id) {
+  if (!confirm(`Delete proxy ${id}?`)) return;
+  const res = await fetch(`${API}/proxies/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (res.ok) {
     await loadProxies();
     renderAll();
   }
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────
+async function triggerScrape() {
+  const btn = $('#btn-scrape') || $('#btn-scrape-full');
+  if (btn) btn.disabled = true;
+  await fetchJSON(API + '/scrape', { method: 'POST' });
+  // Poll for completion
+  const poll = setInterval(async () => {
+    await loadScrapeStatus();
+    renderScraper();
+    if (!state.scrapeStatus?.running) {
+      clearInterval(poll);
+      if (btn) btn.disabled = false;
+      await refresh();
+    }
+  }, 1500);
+}
+
+// ── Modal ──────────────────────────────────────────────────────────────
+
+function showAddModal() { $('#add-modal').style.display = 'flex'; }
+function closeAddModal() {
+  $('#add-modal').style.display = 'none';
+  $('#add-host').value = '';
+  $('#add-port').value = '';
+  $('#add-country').value = '';
+}
+
+async function submitAddProxy() {
+  const host = $('#add-host').value.trim();
+  const port = parseInt($('#add-port').value);
+  if (!host || !port) { alert('Host and port required'); return; }
+  const proto = $('#add-proto').value;
+  const country = $('#add-country').value.trim() || null;
+
+  const res = await fetch(API + '/proxies', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ host, port, protocol: proto, country }),
+  });
+  if (res.status === 201) {
+    closeAddModal();
+    await loadProxies();
+    renderAll();
+  } else {
+    alert('Failed to add proxy');
+  }
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────
 
 function esc(s) {
   if (s == null) return '';
@@ -220,4 +273,17 @@ function esc(s) {
 
 // ── Init ────────────────────────────────────────────────────────────────
 
-document.addEventListener('DOMContentLoaded', startPolling);
+document.addEventListener('DOMContentLoaded', () => {
+  refresh();
+  setInterval(refresh, 3000);
+});
+
+// Rotate button
+document.addEventListener('click', e => {
+  if (e.target.id === 'btn-rotate') {
+    (async () => {
+      const d = await fetchJSON(API + '/rotate', { method: 'POST' });
+      if (d) { state.status = { ...state.status, active_proxy: d }; await loadProxies(); renderAll(); }
+    })();
+  }
+});
