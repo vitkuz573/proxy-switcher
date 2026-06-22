@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Request},
+    extract::{Path, Request, State},
     http::StatusCode,
     response::{Html, IntoResponse, Json, Response},
     routing::{delete, get, post},
@@ -32,10 +32,11 @@ pub struct AppState {
     pub health: Arc<HealthChecker>,
     pub scrape_state: Arc<RwLock<ScrapeState>>,
     pub sources: Arc<RwLock<Vec<String>>>,
+    pub ui_dir: std::path::PathBuf,
 }
 
 pub fn build_router(state: AppState) -> Router {
-    let api = Router::new()
+    Router::new()
         .route("/api/v1/status", get(get_status))
         .route("/api/v1/proxies", get(list_proxies).post(add_proxy))
         .route("/api/v1/proxies/{id}", delete(delete_proxy))
@@ -47,15 +48,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/scrape/status", get(scrape_status))
         .route("/api/v1/sources", get(list_sources).post(add_source))
         .route("/api/v1/sources/{id}", delete(delete_source))
-        .with_state(state);
-
-    Router::new()
-        .nest("/", api)
         .fallback(ui_handler)
+        .with_state(state)
 }
 
-async fn ui_handler(req: Request) -> Response {
-    let ui_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+async fn ui_handler(State(state): State<AppState>, req: Request) -> Response {
+    let ui_path = &state.ui_dir;
     let path = req.uri().path().trim_start_matches('/');
     let file_path = if path.is_empty() {
         ui_path.join("index.html")

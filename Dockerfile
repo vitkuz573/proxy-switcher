@@ -37,6 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /app/target/release/proxy-daemon /usr/local/bin/proxy-daemon
 COPY --from=builder /app/target/release/proxy-cli /usr/local/bin/proxy-cli
+COPY --from=builder /app/crates/proxy-daemon/ui /usr/share/proxy-switcher/ui
 
 EXPOSE 9090
 

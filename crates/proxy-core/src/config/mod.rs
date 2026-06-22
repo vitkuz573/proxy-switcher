@@ -15,6 +15,7 @@ pub struct DaemonConfig {
     pub api_host: String,
     pub api_port: u16,
     pub data_dir: PathBuf,
+    pub ui_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +56,7 @@ impl Default for Config {
                 api_host: "127.0.0.1".into(),
                 api_port: 8080,
                 data_dir: PathBuf::from("/var/lib/proxy-switcher"),
+                ui_dir: PathBuf::from("/usr/share/proxy-switcher/ui"),
             },
             tun: TunConfig {
                 name: "ps-tun0".into(),

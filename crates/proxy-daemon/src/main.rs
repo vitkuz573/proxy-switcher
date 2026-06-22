@@ -100,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
         health: health.clone(),
         scrape_state: scrape_state.clone(),
         sources: sources.clone(),
+        ui_dir: config.daemon.ui_dir.clone(),
     };
 
     // Automatic scrape loop
