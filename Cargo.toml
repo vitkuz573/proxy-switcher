@@ -22,6 +22,7 @@ reqwest = { version = "0.12", features = ["socks"] }
 toml = "0.8"
 url = "2"
 rand = "0.8"
+libc = "0.2"
 
 [profile.release]
 opt-level = 3

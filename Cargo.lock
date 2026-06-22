@@ -1541,6 +1541,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "hickory-resolver",
+ "libc",
  "rand",
  "reqwest",
  "rusqlite",

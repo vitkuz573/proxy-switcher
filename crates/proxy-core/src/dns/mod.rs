@@ -59,7 +59,7 @@ impl DnsCache {
 }
 
 /// Parse a DNS response payload (after UDP header) and extract A record mappings.
-/// Returns (hostname, ip) pairs.
+/// Returns (hostname, ip) pairs with the actual hostname extracted from the query.
 pub fn parse_dns_response(data: &[u8]) -> Vec<(String, Ipv4Addr)> {
     if data.len() < 12 {
         return vec![];
@@ -72,13 +72,26 @@ pub fn parse_dns_response(data: &[u8]) -> Vec<(String, Ipv4Addr)> {
 
     let questions = u16::from_be_bytes([data[4], data[5]]) as usize;
     let answers = u16::from_be_bytes([data[6], data[7]]) as usize;
-    if questions == 0 || answers == 0 {
+    if answers == 0 {
         return vec![];
     }
 
     let mut offset = 12;
 
-    for _ in 0..questions {
+    // Parse question section: extract the original query name
+    let mut query_name = String::new();
+    if questions > 0 {
+        if let Some((name, new_off)) = decode_name(data, offset) {
+            query_name = name;
+            offset = new_off;
+        }
+        if offset + 4 > data.len() {
+            return vec![];
+        }
+        offset += 4;
+    }
+    // Skip remaining questions
+    for _ in 1..questions {
         match skip_name(data, offset) {
             Some(new) => offset = new,
             None => return vec![],
@@ -89,24 +102,27 @@ pub fn parse_dns_response(data: &[u8]) -> Vec<(String, Ipv4Addr)> {
         offset += 4;
     }
 
+    // Parse answer section
     let mut results = Vec::new();
     for _ in 0..answers {
-        match skip_name(data, offset) {
-            Some(new) => offset = new,
+        // Read the answer name (usually a pointer to the query)
+        match decode_name(data, offset) {
+            Some((_, new)) => offset = new,
             None => return results,
         }
         if offset + 10 > data.len() {
             return results;
         }
         let atype = u16::from_be_bytes([data[offset], data[offset + 1]]);
-        let aclass = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
+        let _aclass = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
         let rdlength = u16::from_be_bytes([data[offset + 8], data[offset + 9]]) as usize;
         offset += 10;
 
-        if atype == 1 && aclass == 1 && rdlength == 4 && offset + 4 <= data.len() {
+        if atype == 1 && rdlength == 4 && offset + 4 <= data.len() {
             let ip = Ipv4Addr::new(data[offset], data[offset + 1], data[offset + 2], data[offset + 3]);
-            // Try to extract the original query name from the answer name
-            results.push((ip.to_string(), ip));
+            if !query_name.is_empty() {
+                results.push((query_name.clone(), ip));
+            }
             offset += rdlength;
         } else {
             offset += rdlength;
@@ -114,6 +130,51 @@ pub fn parse_dns_response(data: &[u8]) -> Vec<(String, Ipv4Addr)> {
     }
 
     results
+}
+
+/// Decode a DNS name at the given offset. Follows pointers if compressed.
+/// Returns (decoded_name, offset_after_name).
+fn decode_name(data: &[u8], start: usize) -> Option<(String, usize)> {
+    let mut labels: Vec<String> = Vec::new();
+    let mut offset = start;
+    let mut end_offset = None;
+
+    loop {
+        if offset >= data.len() {
+            return None;
+        }
+        let b = data[offset];
+        if b == 0 {
+            if end_offset.is_none() {
+                end_offset = Some(offset + 1);
+            }
+            break;
+        }
+        if b & 0xC0 == 0xC0 {
+            if offset + 1 >= data.len() {
+                return None;
+            }
+            let ptr = (((b & 0x3F) as usize) << 8) | data[offset + 1] as usize;
+            if end_offset.is_none() {
+                end_offset = Some(offset + 2);
+            }
+            offset = ptr;
+            continue;
+        }
+        let label_len = b as usize;
+        if offset + 1 + label_len > data.len() {
+            return None;
+        }
+        let label = std::str::from_utf8(&data[offset + 1..offset + 1 + label_len]).ok()?;
+        labels.push(label.to_owned());
+        offset += 1 + label_len;
+    }
+
+    if labels.is_empty() {
+        return None;
+    }
+
+    Some((labels.join("."), end_offset.unwrap_or(offset)))
 }
 
 fn skip_name(data: &[u8], start: usize) -> Option<usize> {
@@ -167,6 +228,7 @@ mod tests {
 
         let results = parse_dns_response(&pkt);
         assert!(!results.is_empty(), "should have parsed at least one record");
+        assert_eq!(results[0].0, "httpbin.org", "hostname should be httpbin.org");
         assert_eq!(results[0].1, Ipv4Addr::new(52, 5, 245, 178));
     }
 }

@@ -162,6 +162,51 @@ pub fn build_response_packet(original: &ParsedPacket, payload: &[u8]) -> Vec<u8>
     pkt
 }
 
+/// Build a UDP/IP packet with correct headers and checksums.
+pub fn build_udp_packet(
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+) -> Vec<u8> {
+    let udp_len = 8u16 + payload.len() as u16;
+    let ip_total = 20 + udp_len as usize;
+
+    let mut pkt = Vec::with_capacity(ip_total);
+    // IP header
+    pkt.push(0x45);
+    pkt.push(0x00);
+    pkt.extend_from_slice(&(ip_total as u16).to_be_bytes());
+    pkt.extend_from_slice(&[0x00, 0x00]);
+    pkt.push(0x40);
+    pkt.push(0x00);
+    pkt.push(64);
+    pkt.push(17);
+    pkt.extend_from_slice(&[0x00, 0x00]);
+    pkt.extend_from_slice(&src_ip.octets());
+    pkt.extend_from_slice(&dst_ip.octets());
+    // UDP header
+    pkt.extend_from_slice(&src_port.to_be_bytes());
+    pkt.extend_from_slice(&dst_port.to_be_bytes());
+    pkt.extend_from_slice(&udp_len.to_be_bytes());
+    pkt.extend_from_slice(&[0x00, 0x00]);
+    // Payload
+    pkt.extend_from_slice(payload);
+
+    // IP checksum
+    let ip_csum = ip_checksum(&pkt[..20]);
+    pkt[10] = (ip_csum >> 8) as u8;
+    pkt[11] = (ip_csum & 0xFF) as u8;
+
+    // UDP checksum
+    let udp_csum = udp_checksum(&src_ip, &dst_ip, &pkt[20..]);
+    pkt[20 + 6] = (udp_csum >> 8) as u8;
+    pkt[20 + 7] = (udp_csum & 0xFF) as u8;
+
+    pkt
+}
+
 fn ip_checksum(data: &[u8]) -> u16 {
     let mut sum = 0u32;
     for chunk in data.chunks(2) {
@@ -172,6 +217,26 @@ fn ip_checksum(data: &[u8]) -> u16 {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
     !(sum as u16)
+}
+
+fn udp_checksum(src: &Ipv4Addr, dst: &Ipv4Addr, segment: &[u8]) -> u16 {
+    let pseudo_len = 12 + segment.len();
+    let mut buf = Vec::with_capacity(pseudo_len);
+    buf.extend_from_slice(&src.octets());
+    buf.extend_from_slice(&dst.octets());
+    buf.push(0);
+    buf.push(17);
+    let len_bytes = (segment.len() as u16).to_be_bytes();
+    buf.extend_from_slice(&len_bytes);
+    buf.extend_from_slice(segment);
+
+    let udp_start = 12;
+    if buf.len() >= udp_start + 8 {
+        buf[udp_start + 6] = 0;
+        buf[udp_start + 7] = 0;
+    }
+
+    ip_checksum(&buf)
 }
 
 fn tcp_checksum(src: &Ipv4Addr, dst: &Ipv4Addr, segment: &[u8]) -> u16 {

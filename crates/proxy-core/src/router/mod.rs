@@ -1,16 +1,20 @@
 pub mod connection;
+pub mod udp;
 
 use crate::dns::DnsCache;
 use crate::forwarder::Forwarder;
-use crate::packet::{build_tcp_packet, ParsedPacket};
+use crate::packet::{build_tcp_packet, build_udp_packet, ParsedPacket};
 use crate::pool::ProxyPool;
 use connection::{ConnectionTracker, FlowKey, TcpState};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, warn};
+use udp::{UdpFlowKey, UdpTracker};
 
 pub struct Router {
     pub tracker: ConnectionTracker,
+    udp_tracker: UdpTracker,
     pool: Arc<ProxyPool>,
     dns_cache: Arc<DnsCache>,
 }
@@ -19,18 +23,39 @@ impl Router {
     pub fn new(pool: Arc<ProxyPool>) -> Self {
         Self {
             tracker: ConnectionTracker::new(),
+            udp_tracker: UdpTracker::new(),
             pool,
             dns_cache: Arc::new(DnsCache::new()),
         }
     }
 
     pub fn with_dns_cache(pool: Arc<ProxyPool>, dns_cache: Arc<DnsCache>) -> Self {
-        Self { tracker: ConnectionTracker::new(), pool, dns_cache }
+        Self {
+            tracker: ConnectionTracker::new(),
+            udp_tracker: UdpTracker::new(),
+            pool,
+            dns_cache,
+        }
+    }
+
+    pub fn with_fwmark(pool: Arc<ProxyPool>, fwmark: u32) -> Self {
+        Self {
+            tracker: ConnectionTracker::new(),
+            udp_tracker: UdpTracker::with_fwmark(fwmark),
+            pool,
+            dns_cache: Arc::new(DnsCache::new()),
+        }
     }
 
     pub fn dns_cache(&self) -> Arc<DnsCache> {
         self.dns_cache.clone()
     }
+
+    pub fn udp_tracker(&self) -> &UdpTracker {
+        &self.udp_tracker
+    }
+
+    // ── TCP ────────────────────────────────────────────────────────────
 
     /// Handle a SYN packet: open proxy tunnel, store TCP state, return SYN-ACK.
     pub async fn handle_outgoing(&self, packet: &ParsedPacket) -> Option<Vec<u8>> {
@@ -112,7 +137,6 @@ impl Router {
     }
 
     /// Forward data payload through tracked proxy connection.
-    /// Tracks TCP sequence number progression and cleans up on FIN/RST.
     pub async fn handle_data(&self, packet: &ParsedPacket) {
         let ip = &packet.ip;
         let tcp = match &packet.tcp {
@@ -137,7 +161,6 @@ impl Router {
                     self.tracker.remove(&key).await;
                     return;
                 }
-                // Flush to ensure data is sent immediately
                 let _ = guard.conn.flush().await;
                 guard.state.client_next_seq =
                     tcp.sequence_number.wrapping_add(packet.payload.len() as u32);
@@ -149,9 +172,7 @@ impl Router {
         }
     }
 
-    /// Read data from all proxy connections and build response IP packets
-    /// with correct TCP sequence numbers.
-    /// Uses non-blocking reads — skips connections with no data available.
+    /// Non-blocking read from all TCP proxy connections → build response packets.
     pub async fn pump_responses(&self) -> Vec<Vec<u8>> {
         let mut responses = Vec::new();
         for key in self.tracker.keys().await {
@@ -164,12 +185,12 @@ impl Router {
             match guard.conn.try_read(&mut buf) {
                 Ok(n) => {
                     if n == 0 {
-                        debug!("Pump: EOF for {key:?}, removing");
+                        debug!("Pump: EOF for {:?}, removing", key);
                         drop(guard);
                         self.tracker.remove(&key).await;
                     } else {
                         buf.truncate(n);
-                        debug!("Pump: read {n} bytes for {key:?}");
+                        debug!("Pump: read {} bytes for {:?}", n, key);
                         let pkt = build_tcp_packet(
                             key.dst_ip,
                             key.src_ip,
@@ -185,18 +206,91 @@ impl Router {
                         responses.push(pkt);
                     }
                 }
-                Err(ref e)
-                    if e.kind() == std::io::ErrorKind::WouldBlock =>
-                {
-                    // No data available yet, skip
-                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(e) => {
-                    debug!("Pump: read error for {key:?}: {e}, removing");
+                    debug!("Pump: read error for {:?}: {}, removing", key, e);
                     drop(guard);
                     self.tracker.remove(&key).await;
                 }
             }
         }
         responses
+    }
+
+    // ── UDP ────────────────────────────────────────────────────────────
+
+    /// Handle a UDP packet: forward payload to destination via UDP socket.
+    /// DNS responses are parsed and cached for TCP hostname resolution.
+    /// Returns the number of bytes sent.
+    pub async fn handle_udp(&self, packet: &ParsedPacket) {
+        if packet.payload.len() < 8 {
+            return;
+        }
+        let src_port = u16::from_be_bytes([packet.payload[0], packet.payload[1]]);
+        let dst_port = u16::from_be_bytes([packet.payload[2], packet.payload[3]]);
+        let udp_payload = &packet.payload[8..];
+
+        if udp_payload.is_empty() {
+            return;
+        }
+
+        let key = UdpFlowKey {
+            src_ip: packet.ip.source,
+            src_port,
+            dst_ip: packet.ip.destination,
+            dst_port,
+        };
+
+        let dest = SocketAddr::new(
+            std::net::IpAddr::V4(packet.ip.destination),
+            dst_port,
+        );
+
+        if let Err(e) = self.udp_tracker.send_or_create(&key, dest, udp_payload).await {
+            debug!("UDP send error: {e}");
+        }
+    }
+
+    /// Read all available UDP responses, build response packets, and
+    /// cache DNS A records for TCP forwarding.
+    pub async fn pump_udp(&self) -> Vec<Vec<u8>> {
+        let mut responses = Vec::new();
+        let results = self.udp_tracker.recv_all().await;
+
+        for (key, payload) in results {
+            // If this was a DNS query (outgoing dst_port == 53),
+            // parse the response for A records and cache them
+            if key.dst_port == 53 {
+                let mappings = crate::dns::parse_dns_response(&payload);
+                for (hostname, ip) in mappings {
+                    debug!("DNS cache: {} -> {}", ip, hostname);
+                    self.dns_cache.insert(ip, hostname).await;
+                }
+            }
+
+            let pkt = build_udp_packet(
+                key.dst_ip,
+                key.src_ip,
+                key.dst_port,
+                key.src_port,
+                &payload,
+            );
+            responses.push(pkt);
+        }
+
+        responses
+    }
+
+    /// Remove stale UDP flows that have exceeded the idle timeout.
+    pub async fn cleanup_udp(&self) {
+        self.udp_tracker.cleanup_stale().await;
+    }
+
+    pub async fn active_tcp_conns(&self) -> usize {
+        self.tracker.len().await
+    }
+
+    pub async fn active_udp_flows(&self) -> usize {
+        self.udp_tracker.len().await
     }
 }

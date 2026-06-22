@@ -36,5 +36,8 @@ rand.workspace = true
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# Socket options
+libc.workspace = true
+
 [dev-dependencies]
 tempfile = "3"

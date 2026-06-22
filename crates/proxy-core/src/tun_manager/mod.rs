@@ -1,10 +1,11 @@
-use crate::dns;
 use crate::packet::ParsedPacket;
 use crate::router::Router;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
+
+use std::io::Write;
 
 pub struct TunManager {
     config: crate::config::TunConfig,
@@ -44,13 +45,17 @@ impl TunManager {
             .context("Failed to spawn blocking task for TUN creation")?
             .context("Failed to create TUN device")?;
 
-        info!("TUN device {} created at {}", self.config.name, self.config.address);
+        info!(
+            "TUN device {} created at {}",
+            self.config.name, self.config.address
+        );
 
         let mut guard = self.dev.lock().await;
         *guard = Some(dev);
         Ok(())
     }
 
+    /// Route all IPv4 traffic through the TUN device (0.0.0.0/0).
     pub async fn set_default_route(&self) -> Result<()> {
         let output = tokio::process::Command::new("ip")
             .args(["route", "replace", "default", "dev", &self.config.name])
@@ -69,6 +74,121 @@ impl TunManager {
         Ok(())
     }
 
+    /// Detect the current default gateway and interface before TUN overrides
+    /// the route table.
+    pub async fn detect_gateway(&self) -> Result<(String, String)> {
+        let out = tokio::process::Command::new("sh")
+            .args(["-c", "ip route show default | awk '{print $3, $5}'"])
+            .output()
+            .await
+            .context("Failed to detect default gateway")?;
+        let output = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let parts: Vec<&str> = output.split_whitespace().collect();
+        if parts.len() < 2 {
+            anyhow::bail!("No default gateway/interface found");
+        }
+        Ok((parts[0].to_string(), parts[1].to_string()))
+    }
+
+    /// Route the proxy's own IP through the real gateway instead of TUN to
+    /// avoid routing loops. Must be called with the gateway captured BEFORE
+    /// set_default_route().
+    pub async fn add_exclude_route(&self, proxy_ip: &str, gateway: &str) -> Result<()> {
+        let output = tokio::process::Command::new("ip")
+            .args(["route", "add", proxy_ip, "via", gateway])
+            .output()
+            .await
+            .context("Failed to add exclude route")?;
+
+        if !output.status.success() {
+            warn!(
+                "add_exclude_route (may already exist): {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        } else {
+            info!("Exclude route: {proxy_ip} via {gateway}");
+        }
+        Ok(())
+    }
+
+    /// Set up a policy routing rule so that UDP sockets with the given
+    /// firewall mark bypass the TUN and go through the real gateway.
+    /// Must be called before the forwarding loop starts.
+    pub async fn setup_fwmark_routing(
+        gateway: &str,
+        iface: &str,
+        table: u32,
+        mark: u32,
+    ) -> Result<()> {
+        // Create a custom routing table that goes through the real gateway
+        let out = tokio::process::Command::new("ip")
+            .args([
+                "route",
+                "add",
+                "default",
+                "via",
+                gateway,
+                "dev",
+                iface,
+                "table",
+                &table.to_string(),
+            ])
+            .output()
+            .await
+            .context("Failed to add fwmark routing table")?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if !stderr.contains("File exists") {
+                warn!("fwmark table add: {stderr}");
+            }
+        }
+
+        // Add rule to route marked packets through the custom table
+        let out = tokio::process::Command::new("ip")
+            .args([
+                "rule",
+                "add",
+                "fwmark",
+                &mark.to_string(),
+                "table",
+                &table.to_string(),
+            ])
+            .output()
+            .await
+            .context("Failed to add fwmark rule")?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if !stderr.contains("File exists") {
+                warn!("fwmark rule add: {stderr}");
+            }
+        }
+
+        info!("FWmark routing: mark {mark} -> table {table} via {gateway} dev {iface}");
+        Ok(())
+    }
+
+    /// Remove the fwmark routing rule and table.
+    pub async fn cleanup_fwmark(table: u32, mark: u32) {
+        let _ = tokio::process::Command::new("ip")
+            .args(["rule", "del", "fwmark", &mark.to_string(), "table", &table.to_string()])
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("ip")
+            .args(["route", "flush", "table", &table.to_string()])
+            .output()
+            .await;
+    }
+
+    /// Remove the exclude route for the proxy IP.
+    pub async fn remove_exclude_route(&self, proxy_ip: &str) {
+        if let Err(e) = std::process::Command::new("ip")
+            .args(["route", "del", proxy_ip])
+            .output()
+        {
+            warn!("Failed to remove exclude route: {e}");
+        }
+    }
+
     pub async fn cleanup(&self) {
         let mut guard = self.dev.lock().await;
         *guard = None;
@@ -81,15 +201,20 @@ impl TunManager {
         info!("TUN cleanup complete");
     }
 
-    /// Take ownership of the TUN device (leaves None in the option)
+    /// Take ownership of the TUN device (leaves None in the option).
     pub async fn take_device(&self) -> Option<tun::Device> {
         self.dev.lock().await.take()
     }
 }
 
-/// Standalone forwarding loop — reads IP packets from TUN, routes them,
-/// pumps responses back. Runs in spawn_blocking with non-blocking response
-/// pumping between each TUN read.
+/// Enterprise-grade TUN forwarding loop.
+///
+/// - Reads all IPv4 packets from TUN
+/// - Routes TCP through proxy (with retransmitted-SYN guard)
+/// - Forwards UDP directly to destinations (non-proxied)
+/// - Intercepts DNS responses for hostname caching
+/// - Non-blocking response pumping for both TCP and UDP
+/// - Periodic cleanup of stale UDP flows
 pub async fn run_forwarding_loop(
     dev: tun::Device,
     router: Arc<Router>,
@@ -102,83 +227,87 @@ pub async fn run_forwarding_loop(
         use std::io::{Read, Write};
         let mut buf = vec![0u8; mtu];
         let mut dev = dev;
-
         let mut packet_count = 0u64;
+        let mut udp_cleanup_counter = 0u64;
+
         loop {
             let n = match dev.read(&mut buf) {
                 Ok(0) => {
-                    tracing::warn!("TUN read returned 0 (EOF)");
+                    warn!("TUN read returned 0 (EOF)");
                     break;
                 }
                 Ok(n) => n,
                 Err(e) => {
-                    tracing::error!("TUN read error: {e}");
+                    warn!("TUN read error: {e}");
                     break;
                 }
             };
 
             packet_count += 1;
             let data = &buf[..n];
-            tracing::info!("TUN read: {n} bytes (packet #{packet_count})");
+            trace_packet(n, packet_count);
 
             match ParsedPacket::parse(data) {
                 Ok(packet) => {
-                    // DNS response interception (UDP, protocol 17)
-                    if packet.ip.protocol == 17 {
-                        if packet.payload.len() >= 8 {
-                            let sport = u16::from_be_bytes([packet.payload[0], packet.payload[1]]);
-                            let dport = u16::from_be_bytes([packet.payload[2], packet.payload[3]]);
-                            if dport == 53 || sport == 53 {
-                                let dns_payload = &packet.payload[8..];
-                                let mappings = dns::parse_dns_response(dns_payload);
-                                if !mappings.is_empty() {
-                                    let dns_cache = router.dns_cache();
-                                    handle.block_on(async {
-                                        for (hostname, ip) in &mappings {
-                                            tracing::info!("DNS cache: {ip} -> {hostname}");
-                                            dns_cache.insert(*ip, hostname.clone()).await;
-                                        }
-                                    });
-                                }
-                            }
-                        }
-                        continue;
+                    let protocol = packet.ip.protocol;
+                    if protocol == 6 {
+                        handle_tcp(&packet, &router, &mut dev, &handle);
+                    } else if protocol == 17 {
+                        handle_udp(&packet, &router, &handle);
                     }
-
-                    tracing::info!(
-                        "Parsed: {}:{} -> {}:{} syn={} fin={} payload={}",
-                        packet.ip.source, packet.tcp.as_ref().map(|t| t.source_port).unwrap_or(0),
-                        packet.ip.destination, packet.tcp.as_ref().map(|t| t.destination_port).unwrap_or(0),
-                        packet.is_tcp_syn(), packet.is_tcp_fin(),
-                        packet.payload.len(),
-                    );
-                    handle.block_on(async {
-                        if let Some(syn_ack) = router.handle_outgoing(&packet).await {
-                            tracing::info!("Writing SYN-ACK ({} bytes)", syn_ack.len());
-                            let _ = dev.write_all(&syn_ack);
-                        }
-                        router.handle_data(&packet).await;
-                    });
                 }
-                Err(_e) => tracing::trace!("Parse error: {_e}"),
+                Err(_e) => {
+                    // Non-IPv4 packets (ARP, IPv6, etc.) are silently ignored
+                }
             }
 
-            // Non-blocking pump: read whatever proxy data is available and
-            // write response packets back to the TUN device.
+            // Non-blocking pump: TCP responses
             handle.block_on(async {
                 let responses = router.pump_responses().await;
-                if !responses.is_empty() {
-                    tracing::info!("Pump: writing {} response packets to TUN", responses.len());
-                    for pkt in &responses {
-                        tracing::info!("Pump: write packet ({} bytes)", pkt.len());
-                        let _ = dev.write_all(pkt);
-                    }
+                for pkt in &responses {
+                    let _ = dev.write_all(pkt);
                 }
             });
+
+            // Non-blocking pump: UDP responses + DNS caching
+            handle.block_on(async {
+                let responses = router.pump_udp().await;
+                for pkt in &responses {
+                    let _ = dev.write_all(pkt);
+                }
+            });
+
+            // Periodic cleanup of stale UDP flows (every 1000 packets)
+            udp_cleanup_counter += 1;
+            if udp_cleanup_counter.is_multiple_of(1000) {
+                handle.block_on(async {
+                    router.cleanup_udp().await;
+                });
+            }
         }
     })
     .await
     .expect("TUN loop panicked");
 
     info!("TUN forwarding loop ended");
+}
+
+fn trace_packet(n: usize, packet_count: u64) {
+    tracing::trace!("TUN read: {n} bytes (packet #{packet_count})");
+}
+
+fn handle_tcp(packet: &ParsedPacket, router: &Arc<Router>, dev: &mut tun::Device, handle: &tokio::runtime::Handle) {
+    handle.block_on(async {
+        if let Some(syn_ack) = router.handle_outgoing(packet).await {
+            tracing::trace!("Writing SYN-ACK ({} bytes)", syn_ack.len());
+            let _ = dev.write_all(&syn_ack);
+        }
+        router.handle_data(packet).await;
+    });
+}
+
+fn handle_udp(packet: &ParsedPacket, router: &Arc<Router>, handle: &tokio::runtime::Handle) {
+    handle.block_on(async {
+        router.handle_udp(packet).await;
+    });
 }

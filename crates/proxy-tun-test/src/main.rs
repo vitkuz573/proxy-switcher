@@ -1,5 +1,4 @@
 use proxy_core::config::TunConfig;
-use proxy_core::dns::DnsCache;
 use proxy_core::pool::ProxyPool;
 use proxy_core::proxy::{Anonymity, ProxyInfo, ProxyProtocol};
 use proxy_core::router::Router;
@@ -11,18 +10,20 @@ use tracing_subscriber::EnvFilter;
 const PROXY_HOST: &str = "116.101.75.173";
 const PROXY_PORT: u16 = 2079;
 const TUN_ADDR: &str = "10.99.0.1";
-const HTTPBIN_IP: &str = "52.5.245.178";
+const FWMARK_TABLE: u32 = 100;
+const FWMARK: u32 = 1;
 
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| "proxy=debug".into()),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| "proxy=info".into()),
         )
         .init();
+
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     rt.block_on(async {
-        println!("=== E2E: TUN + Router + Forwarder + Proxy ===");
+        println!("=== E2E: Full traffic through TUN + Proxy ===");
 
         // Pool with known proxy
         let pool = Arc::new(ProxyPool::new());
@@ -42,15 +43,26 @@ fn main() {
             .await;
         println!("Proxy: {}", pool.active().await.unwrap().id);
 
-        // DNS cache with httpbin.org mapping
-        let dns_cache = Arc::new(DnsCache::new());
-        dns_cache.insert_str(HTTPBIN_IP, "httpbin.org").await;
-        println!("DNS cache: {HTTPBIN_IP} -> httpbin.org");
+        // Detect real gateway and interface BEFORE overriding the route table
+        let mgr_temp = TunManager::new(TunConfig {
+            name: "ps-tun0".into(),
+            address: TUN_ADDR.into(),
+            mtu: 1500,
+            disable_ipv6: true,
+        });
+        let (gateway, iface) = mgr_temp.detect_gateway().await.expect("detect_gateway failed");
+        println!("Real gateway: {gateway}, interface: {iface}");
 
-        // Router with shared DNS cache
-        let router = Arc::new(Router::with_dns_cache(pool.clone(), dns_cache.clone()));
+        // Set up fwmark routing so our UDP sockets bypass the TUN (no loop)
+        TunManager::setup_fwmark_routing(&gateway, &iface, FWMARK_TABLE, FWMARK)
+            .await
+            .expect("setup_fwmark_routing failed");
+        println!("FWmark routing: mark {FWMARK} -> table {FWMARK_TABLE} via {gateway}");
 
-        // TUN
+        // Router with fwmark for UDP sockets
+        let router = Arc::new(Router::with_fwmark(pool.clone(), FWMARK));
+
+        // TUN device
         let mgr = TunManager::new(TunConfig {
             name: "ps-tun0".into(),
             address: TUN_ADDR.into(),
@@ -58,46 +70,56 @@ fn main() {
             disable_ipv6: true,
         });
         mgr.create().await.expect("TUN create failed");
+
+        // Default route: all IPv4 through TUN
+        mgr.set_default_route().await.expect("set_default_route failed");
+        println!("Default route: 0.0.0.0/0 -> ps-tun0");
+
+        // Exclude route: proxy IP via real gateway (avoids routing loop)
+        mgr.add_exclude_route(PROXY_HOST, &gateway)
+            .await
+            .expect("add_exclude_route failed");
+        println!("Exclude route: {PROXY_HOST} -> {gateway}");
+
         let dev = mgr.take_device().await.expect("No TUN device");
         drop(mgr);
 
-        // Forwarding loop
+        // Forwarding loop in background thread
         let router_fwd = router.clone();
         let _ = std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(run_forwarding_loop(dev, router_fwd, 1500));
         });
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Wait for routes and forwarding loop to settle
+        tokio::time::sleep(Duration::from_millis(1000)).await;
 
-        // Route httpbin through TUN
-        let out = std::process::Command::new("ip")
-            .args(["route", "add", HTTPBIN_IP, "dev", "ps-tun0"])
-            .output()
-            .expect("ip route failed");
-        if !out.status.success() {
-            eprintln!("Route error: {}", String::from_utf8_lossy(&out.stderr));
-        } else {
-            println!("Route: {HTTPBIN_IP} -> ps-tun0");
-        }
+        println!("\n=== curl httpbin.org (full E2E: DNS → TCP → Proxy) ===");
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        println!("\n=== curl httpbin.org through TUN ===");
-
+        // Full E2E test: DNS goes through TUN → UDP forwarded → cached →
+        // TCP SYN uses hostname → proxy CONNECT → response
         let out = std::process::Command::new("timeout")
-            .args(["30", "curl", "-v", "--max-time", "25", "--resolve", &format!("httpbin.org:80:{HTTPBIN_IP}"), "http://httpbin.org/ip"])
+            .args(["45", "curl", "-v", "--max-time", "35", "http://httpbin.org/ip"])
             .output()
             .expect("curl failed");
 
         let exit_code = out.status.code().unwrap_or(-1);
         println!("curl exit code: {exit_code}");
-        if !out.stdout.is_empty() {
+
+        let passed = if !out.stdout.is_empty() {
             let body = String::from_utf8_lossy(&out.stdout);
             println!("stdout: {body}");
-            if body.contains(PROXY_HOST) || body.contains("origin") {
-                println!("\n*** E2E PASS ***");
-            }
+            body.contains("origin")
+        } else {
+            false
+        };
+
+        if passed {
+            println!("\n*** E2E PASS ***");
+        } else {
+            println!("\n*** E2E FAIL ***");
         }
+
         if !out.stderr.is_empty() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let lines: Vec<&str> = stderr.trim().lines().collect();
@@ -107,14 +129,11 @@ fn main() {
             }
         }
 
-        // Direct test
-        println!("\n=== Direct request ===");
-        let out = std::process::Command::new("curl")
-            .args(["-s", "--max-time", "10", "http://httpbin.org/ip"])
-            .output()
-            .expect("curl direct failed");
-        if out.status.success() {
-            println!("Direct: {}", String::from_utf8_lossy(&out.stdout));
+        // Cleanup fwmark
+        TunManager::cleanup_fwmark(FWMARK_TABLE, FWMARK).await;
+
+        if !passed {
+            std::process::exit(1);
         }
     });
 }
