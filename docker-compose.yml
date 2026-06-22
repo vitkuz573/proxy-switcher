@@ -1,0 +1,24 @@
+services:
+  proxy-switcher:
+    build: .
+    image: proxy-switcher:latest
+    container_name: proxy-switcher
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./config/proxy-switcher.docker.toml:/etc/proxy-switcher/config.toml:ro
+      - proxy-switcher-data:/var/lib/proxy-switcher
+    environment:
+      - RUST_LOG=proxy=info
+    logging:
+      driver: journald
+      options:
+        tag: proxy-switcher
+
+volumes:
+  proxy-switcher-data:

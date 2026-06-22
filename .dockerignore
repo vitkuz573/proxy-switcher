@@ -1,0 +1,13 @@
+target/
+.git/
+.gitignore
+.planning/
+docs/
+frontend/
+scripts/
+*.md
+*.swp
+*.swo
+.DS_Store
+.env
+docker-compose.yml

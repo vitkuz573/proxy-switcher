@@ -1,0 +1,27 @@
+[daemon]
+api_host = "127.0.0.1"
+api_port = 9090
+data_dir = "/var/lib/proxy-switcher"
+
+[tun]
+name = "ps-tun0"
+address = "10.0.0.1"
+mtu = 1500
+disable_ipv6 = true
+
+[scraper]
+enabled = true
+interval_secs = 300
+sources = []
+
+[health]
+concurrency = 20
+timeout_secs = 10
+check_interval_secs = 60
+target_url = "http://httpbin.org/ip"
+
+[pool]
+max_proxies = 1000
+min_score = 0.0
+auto_rotate = false
+rotate_interval_secs = 120
