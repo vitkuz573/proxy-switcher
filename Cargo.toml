@@ -3,7 +3,9 @@ resolver = "2"
 members = [
     "crates/proxy-core",
     "crates/proxy-daemon",
-    "crates/proxy-cli", "crates/proxy-test",
+    "crates/proxy-cli",
+    "crates/proxy-test",
+    "crates/proxy-tun-test",
 ]
 
 [workspace.dependencies]

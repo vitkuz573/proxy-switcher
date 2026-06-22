@@ -25,6 +25,24 @@ impl AsyncRead for ForwardConnection {
     }
 }
 
+impl ForwardConnection {
+    /// Non-blocking read. Returns `WouldBlock` if no data available.
+    pub fn try_read(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            ForwardConnection::Direct(s) => s.try_read(buf),
+            ForwardConnection::HttpConnect(s) => s.try_read(buf),
+            ForwardConnection::Socks5(s) => {
+                use std::ops::Deref;
+                s.deref().try_read(buf)
+            }
+            ForwardConnection::Socks4(s) => {
+                use std::ops::Deref;
+                s.deref().try_read(buf)
+            }
+        }
+    }
+}
+
 impl AsyncWrite for ForwardConnection {
     fn poll_write(
         self: std::pin::Pin<&mut Self>,

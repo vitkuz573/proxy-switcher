@@ -1,7 +1,7 @@
+use crate::dns;
 use crate::packet::ParsedPacket;
 use crate::router::Router;
 use anyhow::{Context, Result};
-use std::io::Read;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -88,10 +88,8 @@ impl TunManager {
 }
 
 /// Standalone forwarding loop — reads IP packets from TUN, routes them,
-/// pumps responses back. Designed to run in a spawned task.
-///
-/// TUN devices use blocking I/O, so this runs the I/O portion in a
-/// spawn_blocking task and bridges to async routing via Handle::block_on.
+/// pumps responses back. Runs in spawn_blocking with non-blocking response
+/// pumping between each TUN read.
 pub async fn run_forwarding_loop(
     dev: tun::Device,
     router: Arc<Router>,
@@ -101,13 +99,17 @@ pub async fn run_forwarding_loop(
     let handle = tokio::runtime::Handle::current();
 
     tokio::task::spawn_blocking(move || {
-        use std::io::Write;
+        use std::io::{Read, Write};
         let mut buf = vec![0u8; mtu];
         let mut dev = dev;
 
+        let mut packet_count = 0u64;
         loop {
             let n = match dev.read(&mut buf) {
-                Ok(0) => break,
+                Ok(0) => {
+                    tracing::warn!("TUN read returned 0 (EOF)");
+                    break;
+                }
                 Ok(n) => n,
                 Err(e) => {
                     tracing::error!("TUN read error: {e}");
@@ -115,23 +117,62 @@ pub async fn run_forwarding_loop(
                 }
             };
 
+            packet_count += 1;
             let data = &buf[..n];
+            tracing::info!("TUN read: {n} bytes (packet #{packet_count})");
+
             match ParsedPacket::parse(data) {
                 Ok(packet) => {
+                    // DNS response interception (UDP, protocol 17)
+                    if packet.ip.protocol == 17 {
+                        if packet.payload.len() >= 8 {
+                            let sport = u16::from_be_bytes([packet.payload[0], packet.payload[1]]);
+                            let dport = u16::from_be_bytes([packet.payload[2], packet.payload[3]]);
+                            if dport == 53 || sport == 53 {
+                                let dns_payload = &packet.payload[8..];
+                                let mappings = dns::parse_dns_response(dns_payload);
+                                if !mappings.is_empty() {
+                                    let dns_cache = router.dns_cache();
+                                    handle.block_on(async {
+                                        for (hostname, ip) in &mappings {
+                                            tracing::info!("DNS cache: {ip} -> {hostname}");
+                                            dns_cache.insert(*ip, hostname.clone()).await;
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    tracing::info!(
+                        "Parsed: {}:{} -> {}:{} syn={} fin={} payload={}",
+                        packet.ip.source, packet.tcp.as_ref().map(|t| t.source_port).unwrap_or(0),
+                        packet.ip.destination, packet.tcp.as_ref().map(|t| t.destination_port).unwrap_or(0),
+                        packet.is_tcp_syn(), packet.is_tcp_fin(),
+                        packet.payload.len(),
+                    );
                     handle.block_on(async {
                         if let Some(syn_ack) = router.handle_outgoing(&packet).await {
+                            tracing::info!("Writing SYN-ACK ({} bytes)", syn_ack.len());
                             let _ = dev.write_all(&syn_ack);
                         }
                         router.handle_data(&packet).await;
                     });
                 }
-                Err(e) => tracing::trace!("Parse error: {e}"),
+                Err(_e) => tracing::trace!("Parse error: {_e}"),
             }
 
+            // Non-blocking pump: read whatever proxy data is available and
+            // write response packets back to the TUN device.
             handle.block_on(async {
                 let responses = router.pump_responses().await;
-                for pkt in &responses {
-                    let _ = dev.write_all(pkt);
+                if !responses.is_empty() {
+                    tracing::info!("Pump: writing {} response packets to TUN", responses.len());
+                    for pkt in &responses {
+                        tracing::info!("Pump: write packet ({} bytes)", pkt.len());
+                        let _ = dev.write_all(pkt);
+                    }
                 }
             });
         }

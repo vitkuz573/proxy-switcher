@@ -1,0 +1,10 @@
+[package]
+name = "proxy-tun-test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+proxy-core = { path = "../proxy-core" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
