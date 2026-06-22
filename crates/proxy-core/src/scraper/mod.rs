@@ -1,11 +1,13 @@
 use crate::proxy::{Anonymity, ProxyInfo, ProxyProtocol};
 use anyhow::Result;
 use std::collections::HashSet;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::info;
 
 pub struct Scraper {
     client: reqwest::Client,
-    sources: Vec<(String, ParseStrategy)>,
+    sources: Arc<RwLock<Vec<String>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -38,31 +40,55 @@ const BUILTIN_SOURCES: &[(&str, ParseStrategy)] = &[
     ("https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks4&timeout=10000&country=all", ParseStrategy::PlainText { proto: ProxyProtocol::Socks4 }),
 ];
 
+fn resolve_strategy(url: &str) -> ParseStrategy {
+    BUILTIN_SOURCES
+        .iter()
+        .find(|(u, _)| *u == url)
+        .map(|(_, s)| *s)
+        .unwrap_or(ParseStrategy::PlainText {
+            proto: ProxyProtocol::Http,
+        })
+}
+
+fn builtin_urls() -> Vec<String> {
+    BUILTIN_SOURCES.iter().map(|(u, _)| u.to_string()).collect()
+}
+
 impl Scraper {
-    pub fn new(sources: Vec<String>) -> Self {
+    pub fn new(sources: Arc<RwLock<Vec<String>>>) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
             .build()
             .expect("Failed to create HTTP client");
 
-        let sources: Vec<(String, ParseStrategy)> = if sources.is_empty() {
-            BUILTIN_SOURCES.iter().map(|(url, s)| (url.to_string(), *s)).collect()
-        } else {
-            sources.into_iter().map(|url| {
-                let strategy = BUILTIN_SOURCES.iter().find(|(u, _)| *u == url).map(|(_, s)| *s);
-                (url, strategy.unwrap_or(ParseStrategy::PlainText { proto: ProxyProtocol::Http }))
-            }).collect()
-        };
-
         Self { client, sources }
     }
 
     pub async fn scrape_all(&self) -> Result<Vec<ProxyInfo>> {
+        let urls = self.sources.read().await;
+        let sources: Vec<(String, ParseStrategy)> = if urls.is_empty() {
+            builtin_urls()
+                .into_iter()
+                .map(|u| {
+                    let s = resolve_strategy(&u);
+                    (u, s)
+                })
+                .collect()
+        } else {
+            urls.iter()
+                .map(|u| {
+                    let s = resolve_strategy(u);
+                    (u.clone(), s)
+                })
+                .collect()
+        };
+        drop(urls);
+
         let mut all = Vec::new();
         let mut seen = HashSet::new();
 
-        for (source, strategy) in &self.sources {
+        for (source, strategy) in &sources {
             match self.scrape_source(source, *strategy).await {
                 Ok(proxies) => {
                     info!("Scraped {} proxies from {}", proxies.len(), source);
@@ -84,12 +110,8 @@ impl Scraper {
 
     async fn scrape_source(&self, url: &str, strategy: ParseStrategy) -> Result<Vec<ProxyInfo>> {
         match strategy {
-            ParseStrategy::Table { .. } => {
-                self.scrape_table(url, strategy).await
-            }
-            ParseStrategy::PlainText { proto } => {
-                self.scrape_plaintext(url, proto).await
-            }
+            ParseStrategy::Table { .. } => self.scrape_table(url, strategy).await,
+            ParseStrategy::PlainText { proto } => self.scrape_plaintext(url, proto).await,
         }
     }
 

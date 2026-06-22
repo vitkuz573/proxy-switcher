@@ -1,6 +1,6 @@
 const API = '/api/v1';
 
-let state = { status: null, proxies: [], stats: null, scrapeStatus: null };
+let state = { status: null, proxies: [], stats: null, scrapeStatus: null, sources: [] };
 
 function $(sel, ctx) { return (ctx || document).querySelector(sel); }
 function $$(sel, ctx) { return Array.from((ctx || document).querySelectorAll(sel)); }
@@ -36,9 +36,10 @@ async function loadStatus() { const d = await fetchJSON(API + '/status'); if (d)
 async function loadProxies() { const d = await fetchJSON(API + '/proxies'); if (d) state.proxies = d; }
 async function loadStats() { const d = await fetchJSON(API + '/stats'); if (d) state.stats = d; }
 async function loadScrapeStatus() { const d = await fetchJSON(API + '/scrape/status'); if (d) state.scrapeStatus = d; }
+async function loadSources() { const d = await fetchJSON(API + '/sources'); if (d) state.sources = d; }
 
 async function refresh() {
-  await Promise.all([loadStatus(), loadProxies(), loadStats(), loadScrapeStatus()]);
+  await Promise.all([loadStatus(), loadProxies(), loadStats(), loadScrapeStatus(), loadSources()]);
   renderAll();
 }
 
@@ -193,6 +194,17 @@ function renderScraper() {
       <td>${s.errors.length ? '<span style="color:var(--red)">' + esc(s.errors.join('; ')) + '</span>' : '—'}</td>
     </tr>`;
   }
+
+  // Sources
+  const srcTbody = $('#sources-list');
+  if (state.sources.length === 0) {
+    srcTbody.innerHTML = '<tr><td colspan="2" class="empty">No custom sources — using built-in defaults</td></tr>';
+  } else {
+    srcTbody.innerHTML = state.sources.map(url => `<tr>
+      <td><code>${esc(url)}</code></td>
+      <td><button class="btn btn-sm" style="color:var(--red);border-color:var(--red)" onclick="deleteSource('${esc(url)}')">Del</button></td>
+    </tr>`).join('');
+  }
 }
 
 // ── Actions ────────────────────────────────────────────────────────────
@@ -259,6 +271,43 @@ async function submitAddProxy() {
     renderAll();
   } else {
     alert('Failed to add proxy');
+  }
+}
+
+// ── Source Modal ────────────────────────────────────────────────────────
+
+function showAddSourceModal() { $('#add-source-modal').style.display = 'flex'; }
+function closeAddSourceModal() {
+  $('#add-source-modal').style.display = 'none';
+  $('#add-source-url').value = '';
+}
+
+async function submitAddSource() {
+  const url = $('#add-source-url').value.trim();
+  if (!url) { alert('URL required'); return; }
+
+  const res = await fetch(API + '/sources', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  });
+  if (res.status === 201) {
+    closeAddSourceModal();
+    await loadSources();
+    renderScraper();
+  } else if (res.status === 409) {
+    alert('Source already exists');
+  } else {
+    alert('Failed to add source');
+  }
+}
+
+async function deleteSource(url) {
+  if (!confirm(`Delete source: ${url}?`)) return;
+  const res = await fetch(`${API}/sources/${encodeURIComponent(url)}`, { method: 'DELETE' });
+  if (res.ok) {
+    await loadSources();
+    renderScraper();
   }
 }
 

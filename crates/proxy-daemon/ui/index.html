@@ -115,6 +115,20 @@
       </div>
     </div>
     <div class="card">
+      <div class="card-header">
+        <h2>Scrape Sources</h2>
+        <button class="btn" onclick="showAddSourceModal()">+ Add Source</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>URL</th><th></th></tr></thead>
+          <tbody id="sources-list">
+            <tr><td colspan="2" class="empty">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card">
       <div class="card-header"><h2>Scrape History</h2></div>
       <div class="table-wrap">
         <table>
@@ -176,6 +190,24 @@
     <div class="modal-footer">
       <button class="btn" onclick="closeAddModal()">Cancel</button>
       <button class="btn btn-primary" onclick="submitAddProxy()">Add</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Source Modal -->
+<div class="modal-overlay" id="add-source-modal" style="display:none" onclick="if(event.target===this)closeAddSourceModal()">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Add Scrape Source</h2>
+      <button class="btn-close" onclick="closeAddSourceModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <label>URL</label>
+      <input type="text" id="add-source-url" placeholder="https://example.com/proxies.txt">
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeAddSourceModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="submitAddSource()">Add</button>
     </div>
   </div>
 </div>

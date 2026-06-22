@@ -31,6 +31,7 @@ pub struct AppState {
     pub scraper: Arc<Scraper>,
     pub health: Arc<HealthChecker>,
     pub scrape_state: Arc<RwLock<ScrapeState>>,
+    pub sources: Arc<RwLock<Vec<String>>>,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -44,6 +45,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/dns", get(get_dns))
         .route("/api/v1/scrape", post(trigger_scrape))
         .route("/api/v1/scrape/status", get(scrape_status))
+        .route("/api/v1/sources", get(list_sources).post(add_source))
+        .route("/api/v1/sources/{id}", delete(delete_source))
         .with_state(state);
 
     Router::new()
@@ -302,4 +305,45 @@ async fn scrape_status(
         healthy_count: s.healthy_count,
         errors: s.errors.clone(),
     })
+}
+
+// ── Sources CRUD ───────────────────────────────────────────────────────
+
+async fn list_sources(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Json<Vec<String>> {
+    Json(state.sources.read().await.clone())
+}
+
+#[derive(Deserialize)]
+struct AddSourceInput {
+    url: String,
+}
+
+async fn add_source(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Json(input): axum::extract::Json<AddSourceInput>,
+) -> StatusCode {
+    if input.url.trim().is_empty() {
+        return StatusCode::BAD_REQUEST;
+    }
+    let mut sources = state.sources.write().await;
+    if sources.contains(&input.url) {
+        return StatusCode::CONFLICT;
+    }
+    sources.push(input.url.trim().to_string());
+    StatusCode::CREATED
+}
+
+async fn delete_source(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Path(url): Path<String>,
+) -> StatusCode {
+    let mut sources = state.sources.write().await;
+    if let Some(pos) = sources.iter().position(|s| s == &url) {
+        sources.remove(pos);
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
 }

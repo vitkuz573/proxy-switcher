@@ -83,7 +83,8 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // Shared state for API
-    let scraper = Arc::new(Scraper::new(config.scraper.sources.clone()));
+    let sources = Arc::new(RwLock::new(config.scraper.sources.clone()));
+    let scraper = Arc::new(Scraper::new(sources.clone()));
     let scrape_state = Arc::new(RwLock::new(api::ScrapeState {
         running: false,
         last_run: None,
@@ -98,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
         scraper: scraper.clone(),
         health: health.clone(),
         scrape_state: scrape_state.clone(),
+        sources: sources.clone(),
     };
 
     // Automatic scrape loop
