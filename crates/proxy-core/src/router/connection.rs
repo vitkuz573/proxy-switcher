@@ -12,8 +12,21 @@ pub struct FlowKey {
     pub dst_port: u16,
 }
 
+#[derive(Debug, Clone)]
+pub struct TcpState {
+    pub client_isn: u32,
+    pub server_isn: u32,
+    pub client_next_seq: u32,
+    pub server_next_seq: u32,
+}
+
+pub struct TrackedConnection {
+    pub conn: ForwardConnection,
+    pub state: TcpState,
+}
+
 pub struct ConnectionTracker {
-    inner: Arc<RwLock<HashMap<FlowKey, Arc<RwLock<ForwardConnection>>>>>,
+    inner: Arc<RwLock<HashMap<FlowKey, Arc<RwLock<TrackedConnection>>>>>,
 }
 
 impl ConnectionTracker {
@@ -21,15 +34,11 @@ impl ConnectionTracker {
         Self { inner: Arc::new(RwLock::new(HashMap::new())) }
     }
 
-    pub async fn is_empty(&self) -> bool {
-        self.inner.read().await.is_empty()
+    pub async fn insert(&self, key: FlowKey, conn: ForwardConnection, state: TcpState) {
+        self.inner.write().await.insert(key, Arc::new(RwLock::new(TrackedConnection { conn, state })));
     }
 
-    pub async fn insert(&self, key: FlowKey, conn: ForwardConnection) {
-        self.inner.write().await.insert(key, Arc::new(RwLock::new(conn)));
-    }
-
-    pub async fn get(&self, key: &FlowKey) -> Option<Arc<RwLock<ForwardConnection>>> {
+    pub async fn get(&self, key: &FlowKey) -> Option<Arc<RwLock<TrackedConnection>>> {
         self.inner.read().await.get(key).cloned()
     }
 
@@ -43,6 +52,10 @@ impl ConnectionTracker {
 
     pub async fn len(&self) -> usize {
         self.inner.read().await.len()
+    }
+
+    pub async fn is_empty(&self) -> bool {
+        self.inner.read().await.is_empty()
     }
 }
 

@@ -1,4 +1,7 @@
+use crate::packet::ParsedPacket;
+use crate::router::Router;
 use anyhow::{Context, Result};
+use std::io::Read;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -77,4 +80,64 @@ impl TunManager {
         }
         info!("TUN cleanup complete");
     }
+
+    /// Take ownership of the TUN device (leaves None in the option)
+    pub async fn take_device(&self) -> Option<tun::Device> {
+        self.dev.lock().await.take()
+    }
+}
+
+/// Standalone forwarding loop — reads IP packets from TUN, routes them,
+/// pumps responses back. Designed to run in a spawned task.
+///
+/// TUN devices use blocking I/O, so this runs the I/O portion in a
+/// spawn_blocking task and bridges to async routing via Handle::block_on.
+pub async fn run_forwarding_loop(
+    dev: tun::Device,
+    router: Arc<Router>,
+    mtu: usize,
+) {
+    info!("Starting TUN forwarding loop (MTU={mtu})");
+    let handle = tokio::runtime::Handle::current();
+
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let mut buf = vec![0u8; mtu];
+        let mut dev = dev;
+
+        loop {
+            let n = match dev.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::error!("TUN read error: {e}");
+                    break;
+                }
+            };
+
+            let data = &buf[..n];
+            match ParsedPacket::parse(data) {
+                Ok(packet) => {
+                    handle.block_on(async {
+                        if let Some(syn_ack) = router.handle_outgoing(&packet).await {
+                            let _ = dev.write_all(&syn_ack);
+                        }
+                        router.handle_data(&packet).await;
+                    });
+                }
+                Err(e) => tracing::trace!("Parse error: {e}"),
+            }
+
+            handle.block_on(async {
+                let responses = router.pump_responses().await;
+                for pkt in &responses {
+                    let _ = dev.write_all(pkt);
+                }
+            });
+        }
+    })
+    .await
+    .expect("TUN loop panicked");
+
+    info!("TUN forwarding loop ended");
 }

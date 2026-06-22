@@ -44,6 +44,59 @@ impl ParsedPacket {
     }
 }
 
+/// Build a TCP-based IP packet with explicit header parameters.
+/// Used by the Router when precise sequence/ack/flag control is needed
+/// (e.g., SYN-ACK generation, data response with tracked seq numbers).
+#[allow(clippy::too_many_arguments)]
+pub fn build_tcp_packet(
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
+    src_port: u16,
+    dst_port: u16,
+    sequence_number: u32,
+    acknowledgment_number: u32,
+    flags: u8,
+    payload: &[u8],
+) -> Vec<u8> {
+    let tcp_len = 20;
+    let ip_total = 20 + tcp_len + payload.len();
+
+    let mut pkt = Vec::with_capacity(ip_total);
+    pkt.push(0x45);
+    pkt.push(0x00);
+    pkt.extend_from_slice(&(ip_total as u16).to_be_bytes());
+    pkt.extend_from_slice(&0u16.to_be_bytes());
+    pkt.push(0x40);
+    pkt.push(0x00);
+    pkt.push(64);
+    pkt.push(6);
+    pkt.extend_from_slice(&[0x00, 0x00]);
+    pkt.extend_from_slice(&src_ip.octets());
+    pkt.extend_from_slice(&dst_ip.octets());
+
+    pkt.extend_from_slice(&src_port.to_be_bytes());
+    pkt.extend_from_slice(&dst_port.to_be_bytes());
+    pkt.extend_from_slice(&sequence_number.to_be_bytes());
+    pkt.extend_from_slice(&acknowledgment_number.to_be_bytes());
+    pkt.push(0x50);
+    pkt.push(flags);
+    pkt.extend_from_slice(&(65535u16).to_be_bytes());
+    pkt.extend_from_slice(&[0x00, 0x00]);
+    pkt.extend_from_slice(&[0x00, 0x00]);
+
+    pkt.extend_from_slice(payload);
+
+    let ip_csum = ip_checksum(&pkt[..20]);
+    pkt[10] = (ip_csum >> 8) as u8;
+    pkt[11] = (ip_csum & 0xFF) as u8;
+
+    let tcp_csum = tcp_checksum(&src_ip, &dst_ip, &pkt[20..]);
+    pkt[20 + 16] = (tcp_csum >> 8) as u8;
+    pkt[20 + 17] = (tcp_csum & 0xFF) as u8;
+
+    pkt
+}
+
 /// Build a response IP packet swapping src/dst and setting payload
 pub fn build_response_packet(original: &ParsedPacket, payload: &[u8]) -> Vec<u8> {
     let ip = &original.ip;

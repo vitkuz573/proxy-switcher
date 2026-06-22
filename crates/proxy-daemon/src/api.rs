@@ -6,10 +6,11 @@ use axum::{
     Router,
 };
 use proxy_core::pool::ProxyPool;
+use proxy_core::router::Router as ProxyRouter;
 use serde::Serialize;
 use std::sync::Arc;
 
-pub fn build_router(pool: Arc<ProxyPool>) -> Router {
+pub fn build_router(pool: Arc<ProxyPool>, _router: Arc<ProxyRouter>) -> Router {
     let state = AppState { pool };
 
     Router::new()

@@ -5,9 +5,10 @@ use clap::Parser;
 use proxy_core::config::Config;
 use proxy_core::health::HealthChecker;
 use proxy_core::pool::ProxyPool;
+use proxy_core::router::Router;
 use proxy_core::scraper::Scraper;
 use proxy_core::storage::Storage;
-use proxy_core::tun_manager::TunManager;
+use proxy_core::tun_manager::{run_forwarding_loop, TunManager};
 use std::sync::Arc;
 use tokio::signal;
 use tracing::{error, info};
@@ -58,8 +59,19 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize TUN
     let tun = TunManager::new(config.tun.clone());
-    if let Err(e) = tun.create().await {
-        error!("Failed to create TUN device (try running as root): {e}");
+    let tun_ok = tun.create().await.is_ok();
+
+    // Take device and start forwarding loop
+    let router = Arc::new(Router::new(pool.clone()));
+
+    if tun_ok {
+        if let Some(dev) = tun.take_device().await {
+            let router_clone = router.clone();
+            let mtu = config.tun.mtu as usize;
+            tokio::spawn(async move {
+                run_forwarding_loop(dev, router_clone, mtu).await;
+            });
+        }
     }
 
     // Health checker
@@ -142,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Start API server
     let addr = format!("{}:{}", config.daemon.api_host, config.daemon.api_port);
-    let router = api::build_router(pool.clone());
+    let router = api::build_router(pool.clone(), router.clone());
 
     info!("Starting API server on {addr}");
     let listener = tokio::net::TcpListener::bind(&addr)

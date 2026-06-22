@@ -1,10 +1,9 @@
 pub mod connection;
 
 use crate::forwarder::Forwarder;
-use crate::packet::build_response_packet;
-use crate::packet::ParsedPacket;
+use crate::packet::{build_tcp_packet, ParsedPacket};
 use crate::pool::ProxyPool;
-use connection::{ConnectionTracker, FlowKey};
+use connection::{ConnectionTracker, FlowKey, TcpState};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, warn};
@@ -19,9 +18,10 @@ impl Router {
         Self { tracker: ConnectionTracker::new(), pool }
     }
 
-    pub async fn handle_outgoing(&self, packet: &ParsedPacket) {
+    /// Handle a SYN packet: open proxy tunnel, store TCP state, return SYN-ACK.
+    pub async fn handle_outgoing(&self, packet: &ParsedPacket) -> Option<Vec<u8>> {
         if !packet.is_tcp_syn() {
-            return;
+            return None;
         }
         let ip = &packet.ip;
         let tcp = packet.tcp.as_ref().unwrap();
@@ -37,7 +37,7 @@ impl Router {
             Some(p) => p,
             None => {
                 warn!("No active proxy");
-                return;
+                return None;
             }
         };
 
@@ -47,11 +47,37 @@ impl Router {
         );
 
         match Forwarder::connect_to(&proxy, &key.dst_ip.to_string(), key.dst_port).await {
-            Ok(conn) => self.tracker.insert(key, conn).await,
-            Err(e) => warn!("Proxy connect failed: {e}"),
+            Ok(conn) => {
+                let server_isn = rand::random::<u32>();
+                let client_isn = tcp.sequence_number;
+                let state = TcpState {
+                    client_isn,
+                    server_isn,
+                    client_next_seq: client_isn.wrapping_add(1),
+                    server_next_seq: server_isn.wrapping_add(1),
+                };
+                self.tracker.insert(key, conn, state).await;
+
+                Some(build_tcp_packet(
+                    ip.destination,
+                    ip.source,
+                    tcp.destination_port,
+                    tcp.source_port,
+                    server_isn,
+                    client_isn.wrapping_add(1),
+                    0x12,
+                    &[],
+                ))
+            }
+            Err(e) => {
+                warn!("Proxy connect failed: {e}");
+                None
+            }
         }
     }
 
+    /// Forward data payload through tracked proxy connection.
+    /// Tracks TCP sequence number progression and cleans up on FIN/RST.
     pub async fn handle_data(&self, packet: &ParsedPacket) {
         let ip = &packet.ip;
         let tcp = match &packet.tcp {
@@ -66,13 +92,17 @@ impl Router {
             dst_port: tcp.destination_port,
         };
 
-        if let Some(conn) = self.tracker.get(&key).await {
+        if let Some(tracked) = self.tracker.get(&key).await {
+            let mut guard = tracked.write().await;
             if !packet.payload.is_empty() {
-                let mut guard = conn.write().await;
-                if let Err(e) = guard.write_all(&packet.payload).await {
+                if let Err(e) = guard.conn.write_all(&packet.payload).await {
                     debug!("Write error, closing: {e}");
+                    drop(guard);
                     self.tracker.remove(&key).await;
+                    return;
                 }
+                guard.state.client_next_seq =
+                    tcp.sequence_number.wrapping_add(packet.payload.len() as u32);
             }
         }
 
@@ -81,56 +111,37 @@ impl Router {
         }
     }
 
-    /// Read data from all proxy connections and build response packets
+    /// Read data from all proxy connections and build response IP packets
+    /// with correct TCP sequence numbers.
     pub async fn pump_responses(&self) -> Vec<Vec<u8>> {
         let mut responses = Vec::new();
         for key in self.tracker.keys().await {
-            let conn = match self.tracker.get(&key).await {
+            let tracked = match self.tracker.get(&key).await {
                 Some(c) => c,
                 None => continue,
             };
-            let mut guard = conn.write().await;
+            let mut guard = tracked.write().await;
             let mut buf = vec![0u8; 65536];
-            match guard.read(&mut buf).await {
+            match guard.conn.read(&mut buf).await {
                 Ok(0) => {
                     drop(guard);
                     self.tracker.remove(&key).await;
                 }
                 Ok(n) => {
                     buf.truncate(n);
-                    let fake_packet = ParsedPacket {
-                        ip: crate::packet::ip::IpHeader {
-                            version: 4,
-                            ihl: 20,
-                            total_length: 0,
-                            identification: 0,
-                            flags: 0,
-                            fragment_offset: 0,
-                            ttl: 0,
-                            protocol: 6,
-                            checksum: 0,
-                            source: key.dst_ip,
-                            destination: key.src_ip,
-                        },
-                        tcp: Some(crate::packet::tcp::TcpHeader {
-                            source_port: key.dst_port,
-                            destination_port: key.src_port,
-                            sequence_number: 0,
-                            acknowledgment_number: 0,
-                            data_offset: 20,
-                            flags: crate::packet::tcp::TcpFlags {
-                                ack: true,
-                                psh: true,
-                                ..Default::default()
-                            },
-                            window_size: 65535,
-                            checksum: 0,
-                            urgent_pointer: 0,
-                        }),
-                        payload: buf.clone(),
-                    };
-                    let ip_pkt = build_response_packet(&fake_packet, &buf);
-                    responses.push(ip_pkt);
+                    let pkt = build_tcp_packet(
+                        key.dst_ip,
+                        key.src_ip,
+                        key.dst_port,
+                        key.src_port,
+                        guard.state.server_next_seq,
+                        guard.state.client_next_seq,
+                        0x18,
+                        &buf,
+                    );
+                    guard.state.server_next_seq =
+                        guard.state.server_next_seq.wrapping_add(n as u32);
+                    responses.push(pkt);
                 }
                 Err(_) => {
                     drop(guard);
