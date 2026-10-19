@@ -325,6 +325,7 @@ async fn create_proxy(State(state): State<AppState>, Json(input): Json<AddProxyI
         country: input.country,
         last_checked: None,
         last_success: None,
+        first_seen: chrono::Utc::now(),
         consecutive_failures: 0,
         score: 0.0,
     };
@@ -540,8 +541,21 @@ async fn create_scrape_run(State(state): State<AppState>) -> Response {
             s.check_total = pending.len();
         }
 
-        let results = health.check_batch(&pending, check_progress).await;
-        let outcome = pool.apply_health_results(results, policy).await;
+        let evicted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = evicted.clone();
+        let apply_pool = pool.clone();
+
+        let counts = health
+            .check_batch(&pending, check_progress, move |result| {
+                let pool = apply_pool.clone();
+                let counter = counter.clone();
+                async move {
+                    if pool.apply_health_result(&result, policy).await {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            })
+            .await;
         check_in_flight.store(false, std::sync::atomic::Ordering::SeqCst);
 
         // Resolve before the macro: an `.await` inside tracing arguments would
@@ -550,11 +564,10 @@ async fn create_scrape_run(State(state): State<AppState>) -> Response {
 
         info!(
             found = count,
-            checked = outcome.checked,
-            working = outcome.working,
-            failed = outcome.failed,
-            inconclusive = outcome.inconclusive,
-            evicted = outcome.evicted,
+            working = counts.working,
+            failed = counts.failed,
+            inconclusive = counts.inconclusive,
+            evicted = evicted.load(std::sync::atomic::Ordering::Relaxed),
             healthy,
             "scrape run complete"
         );

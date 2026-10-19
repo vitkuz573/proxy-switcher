@@ -199,11 +199,22 @@ impl HealthChecker {
     /// `checked` is reset to 0 and incremented as each probe finishes, so callers
     /// can expose live progress instead of a counter frozen at zero for the
     /// whole batch.
-    pub async fn check_batch(
+    /// Probe every proxy, handing each result to `on_result` as it arrives.
+    ///
+    /// Results are streamed rather than returned as one vector because a batch
+    /// of ten thousand proxies runs for minutes. Collecting first and applying
+    /// afterwards left the pool reporting zero working proxies for the whole
+    /// run: nothing was marked usable until the last probe finished.
+    pub async fn check_batch<F, Fut>(
         &self,
         proxies: &[ProxyInfo],
         checked: Arc<AtomicUsize>,
-    ) -> Vec<HealthResult> {
+        mut on_result: F,
+    ) -> CheckCounts
+    where
+        F: FnMut(HealthResult) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
         let total = proxies.len();
         checked.store(0, Ordering::Relaxed);
 
@@ -235,18 +246,34 @@ impl HealthChecker {
         }
         drop(tx);
 
-        let mut results = Vec::with_capacity(total);
+        let mut counts = CheckCounts::default();
         while let Some(result) = rx.recv().await {
-            results.push(result);
+            match result.verdict {
+                Verdict::Working => counts.working += 1,
+                Verdict::Failed => counts.failed += 1,
+                Verdict::Inconclusive => counts.inconclusive += 1,
+            }
+            on_result(result).await;
         }
 
         tracing::info!(
-            "Health check batch: {}/{} probes completed",
-            results.len(),
-            total
+            checked = counts.working + counts.failed + counts.inconclusive,
+            total,
+            working = counts.working,
+            failed = counts.failed,
+            inconclusive = counts.inconclusive,
+            "Health check batch complete"
         );
-        results
+        counts
     }
+}
+
+/// Tally of a streamed batch.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CheckCounts {
+    pub working: usize,
+    pub failed: usize,
+    pub inconclusive: usize,
 }
 
 #[cfg(test)]

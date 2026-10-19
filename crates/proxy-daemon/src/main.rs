@@ -45,19 +45,29 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let pool = Arc::new(ProxyPool::new());
-    let _storage = if let Some(parent) = config.daemon.data_dir.parent() {
+    let db_path = if let Some(parent) = config.daemon.data_dir.parent() {
         tokio::fs::create_dir_all(parent).await.ok();
-        let db_path = config.daemon.data_dir.join("proxy-switcher.db");
-        match Storage::open(&db_path) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                error!("Failed to open storage: {e}");
-                None
-            }
-        }
+        Some(config.daemon.data_dir.join("proxy-switcher.db"))
     } else {
         None
     };
+
+    // Restore the pool before anything else runs.
+    //
+    // Without this the pool starts empty on every boot: the first scrape
+    // repopulates it, but `last_success` is lost, so every proxy reads as
+    // unverified and the whole pool is re-probed from scratch. Restoring keeps
+    // the post-restart batch down to whatever the scrape actually discovered.
+    if let Some(path) = db_path.as_ref() {
+        let restored = Storage::open(path).and_then(|s| s.load_proxies());
+        match restored {
+            Ok(restored) if !restored.is_empty() => {
+                pool.restore(restored).await;
+            }
+            Ok(_) => info!("storage holds no proxies yet"),
+            Err(e) => error!("Failed to restore pool: {e}"),
+        }
+    }
 
     // Initialize TUN
     let tun = TunManager::new(config.tun.clone());
@@ -121,6 +131,7 @@ async fn main() -> anyhow::Result<()> {
         let loop_progress = check_progress.clone();
         let loop_in_flight = check_in_flight.clone();
 
+        let db_path = db_path.clone();
         tokio::spawn(async move {
             loop {
                 let mut s = scrape_state_clone.write().await;
@@ -174,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
                 let progress = loop_progress.clone();
                 let in_flight = loop_in_flight.clone();
                 let policy = eviction_policy;
+                let st = db_path.clone();
 
                 if pending.is_empty() {
                     info!("no unverified proxies to check");
@@ -204,12 +216,65 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 tokio::spawn(async move {
-                    let results = hc.check_batch(&pending, progress).await;
-                    pc.apply_health_results(results, policy).await;
+                    // Stream each result into the pool as it arrives, so
+                    // confirmed proxies become routable during the batch
+                    // instead of only once the last probe finishes.
+                    let evict_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+                    let counts = {
+                        let pc = pc.clone();
+                        let evict_count = evict_count.clone();
+                        hc.check_batch(&pending, progress, move |result| {
+                            let pc = pc.clone();
+                            let evict_count = evict_count.clone();
+                            async move {
+                                if pc.apply_health_result(&result, policy).await {
+                                    evict_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                            }
+                        })
+                        .await
+                    };
+
                     in_flight.store(false, std::sync::atomic::Ordering::SeqCst);
+                    // Resolve before the macro: an `.await` inside tracing
+                    // arguments keeps its temporary alive across the await and
+                    // makes the future !Send.
+                    let healthy = pc.healthy_count().await;
+                    let pool_size = pc.len().await;
+
                     let mut s = sc.write().await;
                     s.check_running = false;
-                    info!("Unverified batch done: pool has {}", pc.len().await);
+                    s.healthy_count = healthy;
+                    drop(s);
+
+                    info!(
+                        working = counts.working,
+                        failed = counts.failed,
+                        inconclusive = counts.inconclusive,
+                        evicted = evict_count.load(std::sync::atomic::Ordering::Relaxed),
+                        healthy,
+                        pool = pool_size,
+                        "Unverified batch done"
+                    );
+
+                    // Persist once the batch settles. Writing per result would
+                    // mean thousands of full-table rewrites.
+                    // The connection is not `Sync`, so it is opened for the
+                    // write and dropped again. Writes happen once per batch, so
+                    // there is nothing to gain from holding it open.
+                    if let Some(path) = st.clone() {
+                        let snapshot = pc.all().await;
+                        match tokio::task::spawn_blocking(move || {
+                            Storage::open(&path)?.replace_proxies(&snapshot)
+                        })
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => error!("Failed to persist pool: {e}"),
+                            Err(e) => error!("Persist task failed: {e}"),
+                        }
+                    }
                 });
 
                 tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
@@ -263,8 +328,22 @@ async fn main() -> anyhow::Result<()> {
                     s.check_total = working.len();
                 }
 
-                let results = health_clone.check_batch(&working, progress.clone()).await;
-                let outcome = pool_clone.apply_health_results(results, policy).await;
+                let evicted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let counter = evicted.clone();
+                let recheck_pool = pool_clone.clone();
+
+                let counts = health_clone
+                    .check_batch(&working, progress.clone(), move |result| {
+                        let pool = recheck_pool.clone();
+                        let counter = counter.clone();
+                        async move {
+                            if pool.apply_health_result(&result, policy).await {
+                                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                    })
+                    .await;
+
                 in_flight.store(false, std::sync::atomic::Ordering::SeqCst);
 
                 let healthy = pool_clone.healthy_count().await;
@@ -273,9 +352,10 @@ async fn main() -> anyhow::Result<()> {
                 s.healthy_count = healthy;
 
                 info!(
-                    working = outcome.working,
-                    failed = outcome.failed,
-                    evicted = outcome.evicted,
+                    working = counts.working,
+                    failed = counts.failed,
+                    inconclusive = counts.inconclusive,
+                    evicted = evicted.load(std::sync::atomic::Ordering::Relaxed),
                     healthy,
                     "re-check complete"
                 );

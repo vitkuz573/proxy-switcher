@@ -1,6 +1,6 @@
 use crate::health::{HealthResult, Verdict};
 use crate::proxy::ProxyInfo;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -91,6 +91,36 @@ impl ProxyPool {
         added
     }
 
+    /// Insert records exactly as they are, preserving their health state.
+    ///
+    /// `merge` is for discovery: a freshly scraped proxy genuinely has no known
+    /// latency, score or verification, so it is inserted through
+    /// `ProxyInfo::discovered`. Restoring from storage is the opposite case —
+    /// the record already carries what the health checker learned, and running
+    /// it through `discovered()` would make every proxy look unverified again
+    /// and send the whole pool back through a full probe cycle on boot.
+    pub async fn restore(&self, saved: Vec<ProxyInfo>) -> usize {
+        let mut inner = self.inner.write().await;
+        let mut added = 0usize;
+
+        for proxy in saved {
+            if inner.index.contains_key(&proxy.id) {
+                continue;
+            }
+            let slot = inner.proxies.len();
+            inner.index.insert(proxy.id.clone(), slot);
+            inner.proxies.push(proxy);
+            added += 1;
+        }
+
+        tracing::info!(
+            added,
+            total = inner.proxies.len(),
+            "pool restored from storage"
+        );
+        added
+    }
+
     /// Proxies that have never been proven to work. These are what a scrape
     /// adds, so this is the set worth probing after one.
     pub async fn unverified(&self) -> Vec<ProxyInfo> {
@@ -120,98 +150,95 @@ impl ProxyPool {
     /// fails `max_consecutive_failures` times in a row, or when an unverified
     /// proxy has sat in the pool past its TTL without ever working. Transient
     /// network blips therefore cost a proxy nothing but one failed attempt.
+    /// Apply one probe result as soon as it arrives.
+    ///
+    /// Streaming this per result is what makes the pool usable during a long
+    /// batch: applied only at the end, ten thousand proxies left the pool
+    /// reporting zero working proxies for the entire run.
+    ///
+    /// Returns true when the proxy was evicted.
+    pub async fn apply_health_result(&self, result: &HealthResult, policy: EvictionPolicy) -> bool {
+        let now = chrono::Utc::now();
+        let mut inner = self.inner.write().await;
+
+        let Some(&i) = inner.index.get(result.proxy_id.as_str()) else {
+            return false;
+        };
+
+        match result.verdict {
+            Verdict::Working => {
+                let proxy = &mut inner.proxies[i];
+                proxy.latency_ms = Some(result.latency_ms);
+                proxy.score = score_for(result.latency_ms);
+                proxy.last_checked = Some(now);
+                proxy.last_success = Some(now);
+                proxy.consecutive_failures = 0;
+                false
+            }
+
+            // The probe proved nothing, so leave the streak, the score and
+            // `last_success` exactly as they were.
+            Verdict::Inconclusive => {
+                inner.proxies[i].last_checked = Some(now);
+                false
+            }
+
+            Verdict::Failed => {
+                let proxy = &mut inner.proxies[i];
+                proxy.last_checked = Some(now);
+                proxy.consecutive_failures = proxy.consecutive_failures.saturating_add(1);
+
+                // Decay rather than reset, so the ranking degrades gradually
+                // instead of dropping out of contention on one bad probe.
+                proxy.score *= 0.5;
+
+                let never_worked = proxy.last_success.is_none();
+                // Measured from when the proxy entered the pool. Measuring from
+                // `last_checked` reset the age on every failed probe, so this
+                // branch never fired and dead proxies accumulated forever.
+                let unverified_age = now
+                    .signed_duration_since(proxy.first_seen)
+                    .num_seconds()
+                    .unsigned_abs();
+
+                let exhausted = proxy.consecutive_failures >= policy.max_consecutive_failures;
+                let stale_unverified =
+                    never_worked && unverified_age >= policy.unverified_ttl_secs as i64 as u64;
+
+                if exhausted || stale_unverified {
+                    let id = proxy.id.clone();
+                    self.retain(&mut inner, |p| p.id != id);
+                    return true;
+                }
+                false
+            }
+        }
+    }
+
+    /// Apply a whole batch, one result at a time.
+    ///
+    /// Kept as a convenience for callers that already hold the results; it
+    /// delegates to `apply_health_result` so there is a single implementation
+    /// of the eviction policy.
     pub async fn apply_health_results(
         &self,
         results: Vec<HealthResult>,
         policy: EvictionPolicy,
     ) -> BatchOutcome {
-        let now = chrono::Utc::now();
         let mut outcome = BatchOutcome {
             checked: results.len(),
             ..Default::default()
         };
 
-        let mut failures: HashMap<&str, u32> = HashMap::new();
-        let mut working: HashMap<&str, u64> = HashMap::new();
-        let mut inconclusive: Vec<&str> = Vec::new();
-
-        for r in &results {
-            match r.verdict {
-                Verdict::Working => {
-                    outcome.working += 1;
-                    working.insert(r.proxy_id.as_str(), r.latency_ms);
-                }
-                Verdict::Failed => {
-                    outcome.failed += 1;
-                    failures.insert(r.proxy_id.as_str(), 1);
-                }
-                Verdict::Inconclusive => {
-                    outcome.inconclusive += 1;
-                    inconclusive.push(r.proxy_id.as_str());
-                }
+        for result in &results {
+            match result.verdict {
+                Verdict::Working => outcome.working += 1,
+                Verdict::Failed => outcome.failed += 1,
+                Verdict::Inconclusive => outcome.inconclusive += 1,
             }
-        }
-
-        let mut inner = self.inner.write().await;
-
-        // Success: refresh measurements and clear the streak.
-        for (id, latency_ms) in &working {
-            if let Some(&i) = inner.index.get(*id) {
-                let proxy = &mut inner.proxies[i];
-                proxy.latency_ms = Some(*latency_ms);
-                proxy.score = score_for(*latency_ms);
-                proxy.last_checked = Some(now);
-                proxy.last_success = Some(now);
-                proxy.consecutive_failures = 0;
+            if self.apply_health_result(result, policy).await {
+                outcome.evicted += 1;
             }
-        }
-
-        // Inconclusive: the probe proved nothing, so leave the streak, the
-        // score and `last_success` exactly as they were.
-        for id in inconclusive {
-            if let Some(&i) = inner.index.get(id) {
-                inner.proxies[i].last_checked = Some(now);
-            }
-        }
-
-        // Failure: record it, evict only once the policy says so.
-        let mut evict: HashSet<String> = HashSet::new();
-
-        for id in failures.keys() {
-            let Some(&i) = inner.index.get(*id) else {
-                continue;
-            };
-
-            let proxy = &mut inner.proxies[i];
-            proxy.last_checked = Some(now);
-            proxy.consecutive_failures = proxy.consecutive_failures.saturating_add(1);
-
-            // Decay rather than reset, so the ranking degrades gradually
-            // instead of dropping out of contention on one bad probe.
-            proxy.score *= 0.5;
-
-            let never_worked = proxy.last_success.is_none();
-            let unverified_age = now
-                .signed_duration_since(
-                    proxy
-                        .last_checked
-                        .unwrap_or(proxy.last_success.unwrap_or(now)),
-                )
-                .num_seconds()
-                .unsigned_abs();
-
-            let exhausted = proxy.consecutive_failures >= policy.max_consecutive_failures;
-            let stale_unverified =
-                never_worked && unverified_age >= policy.unverified_ttl_secs as i64 as u64;
-
-            if exhausted || stale_unverified {
-                evict.insert((*id).to_string());
-            }
-        }
-
-        if !evict.is_empty() {
-            outcome.evicted = evict.len();
-            self.retain(&mut inner, |p| !evict.contains(&p.id));
         }
 
         tracing::info!(
@@ -220,7 +247,7 @@ impl ProxyPool {
             failed = outcome.failed,
             inconclusive = outcome.inconclusive,
             evicted = outcome.evicted,
-            pool = inner.proxies.len(),
+            pool = self.len().await,
             "health check applied"
         );
 
@@ -379,6 +406,7 @@ mod tests {
             country: None,
             last_checked: None,
             last_success: None,
+            first_seen: chrono::Utc::now(),
             consecutive_failures: 0,
             score: 0.0,
         }
@@ -545,5 +573,131 @@ mod tests {
             Some("b".to_string()),
             "rotate must advance to the next proxy"
         );
+    }
+
+    #[tokio::test]
+    async fn restore_keeps_verification_and_merge_does_not() {
+        use crate::proxy::{Anonymity, ProxyProtocol};
+
+        let pool = ProxyPool::new();
+        let now = chrono::Utc::now();
+
+        let saved = |id: &str, confirmed: bool| ProxyInfo {
+            id: id.to_string(),
+            host: "198.51.100.1".to_string(),
+            port: 8080,
+            protocol: ProxyProtocol::Socks5,
+            anonymity: Anonymity::Elite,
+            latency_ms: Some(90),
+            country: None,
+            last_checked: Some(now),
+            last_success: confirmed.then_some(now),
+            first_seen: chrono::Utc::now(),
+            consecutive_failures: 0,
+            score: 0.9,
+        };
+
+        // Restoring must keep the verification, or the whole pool is re-probed.
+        pool.restore(vec![saved("a:1", true), saved("b:2", false)])
+            .await;
+        assert_eq!(
+            pool.healthy_count().await,
+            1,
+            "confirmed proxy must stay working"
+        );
+        assert_eq!(
+            pool.unverified().await.len(),
+            1,
+            "only the unverified one needs probing"
+        );
+
+        // A scrape uses `discovered`, so a known proxy keeps its state.
+        pool.merge(vec![saved("a:1", true)]).await;
+        assert_eq!(
+            pool.healthy_count().await,
+            1,
+            "a scrape must not reset health"
+        );
+
+        let fresh = ProxyInfo {
+            id: "c:3".to_string(),
+            host: "198.51.100.3".to_string(),
+            port: 3128,
+            protocol: ProxyProtocol::Http,
+            anonymity: Anonymity::Unknown,
+            latency_ms: Some(500),
+            country: None,
+            last_checked: Some(now),
+            last_success: Some(now),
+            first_seen: chrono::Utc::now(),
+            consecutive_failures: 0,
+            score: 0.5,
+        };
+        pool.merge(vec![fresh]).await;
+        assert_eq!(
+            pool.healthy_count().await,
+            1,
+            "a newly scraped proxy is unverified until it is probed"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unverified_proxy_is_evicted_once_its_ttl_expires() {
+        use crate::proxy::{Anonymity, ProxyProtocol};
+
+        let pool = ProxyPool::new();
+        let policy = EvictionPolicy {
+            max_consecutive_failures: 3,
+            unverified_ttl_secs: 3600,
+        };
+
+        let mut stale = ProxyInfo {
+            id: "old:1".to_string(),
+            host: "198.51.100.1".to_string(),
+            port: 8080,
+            protocol: ProxyProtocol::Http,
+            anonymity: Anonymity::Unknown,
+            latency_ms: None,
+            country: None,
+            last_checked: None,
+            last_success: None,
+            first_seen: chrono::Utc::now() - chrono::Duration::seconds(7200),
+            consecutive_failures: 0,
+            score: 0.0,
+        };
+
+        // `restore` inserts the record verbatim, which is how a pool reloaded
+        // from storage arrives. `add` would reset `first_seen`, because a
+        // manual add asserts the endpoint afresh.
+        pool.restore(vec![stale.clone()]).await;
+
+        let result = HealthResult {
+            proxy_id: stale.id.clone(),
+            verdict: Verdict::Failed,
+            latency_ms: 0,
+            error: None,
+        };
+
+        // Measured from `first_seen`, not from `last_checked`: a proxy that has
+        // been failing for two hours must not be kept alive by its own last
+        // failure resetting the clock.
+        assert!(
+            pool.apply_health_result(&result, policy).await,
+            "a never-working proxy past its TTL must be evicted"
+        );
+        assert_eq!(pool.len().await, 0);
+
+        // The same verdict on a fresh proxy must not evict it.
+        stale.id = "new:2".to_string();
+        stale.first_seen = chrono::Utc::now();
+        pool.add(stale.clone()).await;
+        let result = HealthResult {
+            proxy_id: stale.id.clone(),
+            verdict: Verdict::Failed,
+            latency_ms: 0,
+            error: None,
+        };
+        assert!(!pool.apply_health_result(&result, policy).await);
+        assert_eq!(pool.len().await, 1, "a single failure never evicts");
     }
 }

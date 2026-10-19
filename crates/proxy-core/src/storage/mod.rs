@@ -1,4 +1,4 @@
-use crate::proxy::ProxyInfo;
+use crate::proxy::{Anonymity, ProxyInfo, ProxyProtocol};
 use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
@@ -35,13 +35,45 @@ impl Storage {
                 last_scraped TEXT
             );",
         )?;
+
+        // A pool restored from disk is only useful if it knows what has already
+        // been confirmed. Without `last_success` every proxy reads as unverified
+        // on boot and the whole pool is re-probed from scratch after each
+        // restart; without the failure streak the eviction policy starts over.
+        //
+        // SQLite has no `ADD COLUMN IF NOT EXISTS`, so each column is added only
+        // when it is genuinely missing — otherwise reopening the database fails.
+        for (column, definition) in [
+            ("last_success", "TEXT"),
+            ("consecutive_failures", "INTEGER NOT NULL DEFAULT 0"),
+            ("first_seen", "TEXT"),
+        ] {
+            if !self.has_column("proxies", column)? {
+                self.conn.execute_batch(&format!(
+                    "ALTER TABLE proxies ADD COLUMN {column} {definition}"
+                ))?;
+            }
+        }
         Ok(())
+    }
+
+    fn has_column(&self, table: &str, column: &str) -> Result<bool> {
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub fn save_proxies(&self, proxies: &[ProxyInfo]) -> Result<()> {
         let mut stmt = self.conn.prepare_cached(
-            "INSERT OR REPLACE INTO proxies (id, host, port, protocol, anonymity, latency_ms, country, score, last_checked)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT OR REPLACE INTO proxies
+             (id, host, port, protocol, anonymity, latency_ms, country, score, last_checked, last_success, consecutive_failures, first_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         )?;
 
         for p in proxies {
@@ -55,8 +87,187 @@ impl Storage {
                 p.country,
                 p.score,
                 p.last_checked.map(|t| t.to_rfc3339()),
+                p.last_success.map(|t| t.to_rfc3339()),
+                p.consecutive_failures as i64,
+                p.first_seen.to_rfc3339(),
             ])?;
         }
         Ok(())
+    }
+
+    /// Replace the stored pool with `proxies`.
+    ///
+    /// A plain upsert would leave evicted rows behind forever, so the table is
+    /// cleared first: what is on disk must be exactly what is in memory. The
+    /// delete and the inserts share one transaction, so a crash mid-write
+    /// leaves the previous pool intact rather than an empty table.
+    pub fn replace_proxies(&self, proxies: &[ProxyInfo]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM proxies", [])?;
+
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO proxies
+             (id, host, port, protocol, anonymity, latency_ms, country, score, last_checked, last_success, consecutive_failures, first_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        )?;
+
+        for p in proxies {
+            stmt.execute(rusqlite::params![
+                p.id,
+                p.host,
+                p.port,
+                format!("{:?}", p.protocol),
+                format!("{:?}", p.anonymity),
+                p.latency_ms,
+                p.country,
+                p.score,
+                p.last_checked.map(|t| t.to_rfc3339()),
+                p.last_success.map(|t| t.to_rfc3339()),
+                p.consecutive_failures as i64,
+                p.first_seen.to_rfc3339(),
+            ])?;
+        }
+
+        drop(stmt);
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Restore the pool, including what has already been verified.
+    pub fn load_proxies(&self) -> Result<Vec<ProxyInfo>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, host, port, protocol, anonymity, latency_ms, country, score,
+                    last_checked, last_success, consecutive_failures, first_seen
+             FROM proxies",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let protocol: String = row.get(3)?;
+            let anonymity: String = row.get(4)?;
+            let latency: Option<i64> = row.get(5)?;
+            let last_checked: Option<String> = row.get(8)?;
+            let last_success: Option<String> = row.get(9)?;
+            let first_seen: Option<String> = row.get(11)?;
+
+            Ok(ProxyInfo {
+                id: row.get(0)?,
+                host: row.get(1)?,
+                port: row.get::<_, i64>(2)? as u16,
+                protocol: parse_enum(&protocol).unwrap_or(ProxyProtocol::Http),
+                anonymity: parse_enum(&anonymity).unwrap_or(Anonymity::Unknown),
+                latency_ms: latency.map(|v| v.max(0) as u64),
+                country: row.get(6)?,
+                last_checked: parse_time(last_checked.clone()),
+                last_success: parse_time(last_success),
+                // A row written before this column existed has no first-seen
+                // time; fall back to its last check so it ages out normally
+                // instead of living forever.
+                first_seen: parse_time(first_seen)
+                    .or_else(|| parse_time(last_checked))
+                    .unwrap_or_else(chrono::Utc::now),
+                consecutive_failures: row.get::<_, Option<i64>>(10)?.unwrap_or(0).max(0) as u32,
+                score: row.get(7)?,
+            })
+        })?;
+
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}
+
+/// Parse a stored `Debug` name back into an enum.
+fn parse_enum<T: std::str::FromStr>(raw: &str) -> Option<T> {
+    raw.parse().ok()
+}
+
+fn parse_time(raw: Option<String>) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(&raw?)
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proxy::{Anonymity, ProxyProtocol};
+
+    fn sample(id: &str, last_success: Option<chrono::DateTime<chrono::Utc>>) -> ProxyInfo {
+        ProxyInfo {
+            id: id.to_string(),
+            host: "198.51.100.1".to_string(),
+            port: 8080,
+            protocol: ProxyProtocol::Socks5,
+            anonymity: Anonymity::Elite,
+            latency_ms: Some(120),
+            country: Some("NL".to_string()),
+            last_checked: Some(chrono::Utc::now()),
+            last_success,
+            first_seen: chrono::Utc::now(),
+            consecutive_failures: 2,
+            score: 0.75,
+        }
+    }
+
+    #[test]
+    fn round_trips_the_verification_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("pool.db");
+        let now = chrono::Utc::now();
+
+        {
+            let storage = Storage::open(&path).expect("open");
+            storage
+                .replace_proxies(&[sample("a:1", Some(now)), sample("b:2", None)])
+                .expect("save");
+        }
+
+        let storage = Storage::open(&path).expect("reopen");
+        let loaded = storage.load_proxies().expect("load");
+        assert_eq!(loaded.len(), 2);
+
+        // `last_success` is what decides whether a proxy must be re-probed, so
+        // losing it is exactly the bug that made every restart start from zero.
+        let confirmed = loaded.iter().find(|p| p.id == "a:1").expect("a:1");
+        assert!(
+            confirmed.last_success.is_some(),
+            "last_success must survive"
+        );
+        assert_eq!(confirmed.consecutive_failures, 2);
+        assert_eq!(confirmed.protocol, ProxyProtocol::Socks5);
+        assert_eq!(confirmed.anonymity, Anonymity::Elite);
+        assert_eq!(confirmed.latency_ms, Some(120));
+
+        let unverified = loaded.iter().find(|p| p.id == "b:2").expect("b:2");
+        assert!(
+            unverified.last_success.is_none(),
+            "a proxy that never worked must stay unverified"
+        );
+    }
+
+    #[test]
+    fn replace_drops_proxies_that_left_the_pool() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("pool.db");
+        let storage = Storage::open(&path).expect("open");
+
+        storage
+            .replace_proxies(&[sample("a:1", None), sample("b:2", None)])
+            .expect("first save");
+        storage
+            .replace_proxies(&[sample("a:1", None)])
+            .expect("second save");
+
+        let loaded = storage.load_proxies().expect("load");
+        assert_eq!(loaded.len(), 1, "an evicted proxy must not linger on disk");
+    }
+
+    #[test]
+    fn reopening_a_migrated_database_is_idempotent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("pool.db");
+
+        // The added columns must not be re-added on the second open.
+        Storage::open(&path).expect("first open");
+        let storage = Storage::open(&path).expect("second open");
+        assert!(storage.load_proxies().expect("load").is_empty());
     }
 }

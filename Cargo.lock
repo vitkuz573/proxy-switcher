@@ -1711,6 +1711,7 @@ dependencies = [
 name = "proxy-test"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "proxy-core",
  "tokio",
  "tracing",
@@ -1721,6 +1722,7 @@ dependencies = [
 name = "proxy-tun-test"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "proxy-core",
  "tokio",
  "tracing",

@@ -8,3 +8,6 @@ proxy-core = { path = "../proxy-core" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }

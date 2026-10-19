@@ -36,6 +36,7 @@ fn main() {
             country: None,
             last_checked: None,
             last_success: None,
+            first_seen: chrono::Utc::now(),
             consecutive_failures: 0,
             score: 100.0,
         };
