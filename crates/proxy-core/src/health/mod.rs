@@ -204,8 +204,17 @@ async fn check_one(
 ) -> HealthResult {
     let start = Instant::now();
 
+    // One deadline for the whole probe, not one per phase.
+    //
+    // The phases used to get the full budget each, so a proxy that hung could
+    // take the connect timeout, then the write timeout, then the read timeout:
+    // thirteen seconds for one probe, and the batch moved at a third of the
+    // rate the concurrency allowed. The phases now share what is left of the
+    // budget, so a probe costs what it is allowed to cost.
+    let deadline = start + timeout;
+
     let mut conn = match tokio::time::timeout(
-        connect_timeout,
+        connect_timeout.min(timeout),
         forwarder.connect_to(proxy, host, port, mark),
     )
     .await
@@ -246,14 +255,16 @@ async fn check_one(
          User-Agent: proxy-switcher-health/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n"
     );
 
-    match tokio::time::timeout(timeout, conn.write_all(request.as_bytes())).await {
+    let remaining = || deadline.saturating_duration_since(Instant::now());
+
+    match tokio::time::timeout(remaining(), conn.write_all(request.as_bytes())).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => return HealthResult::failed(&proxy.id, format!("write error: {e}")),
         Err(_) => return HealthResult::inconclusive(&proxy.id, "write timeout"),
     }
 
     let mut buf = Vec::new();
-    match tokio::time::timeout(timeout, conn.read_to_end(&mut buf)).await {
+    match tokio::time::timeout(remaining(), conn.read_to_end(&mut buf)).await {
         Ok(Ok(_)) => {
             let response = String::from_utf8_lossy(&buf);
             let status = response
@@ -352,18 +363,24 @@ async fn check_plain_forwarding(
     mark: Option<u32>,
     start: Instant,
 ) -> Result<HealthResult, String> {
-    let mut stream = crate::net::connect_tcp(
-        std::net::SocketAddr::new(
-            proxy
-                .host
-                .parse::<std::net::IpAddr>()
-                .map_err(|_| "the proxy address is not numeric".to_string())?,
-            proxy.port,
-        ),
-        mark,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    // The connection to the proxy is bounded, like every other one.
+    //
+    // It was not, and that was enough to hang a whole round: a proxy that
+    // blackholes the connection — the SYN goes out and nothing comes back —
+    // failed the tunnel, and the fallback connection then waited forever. The
+    // round never finished, and with it the whole check.
+    let address = std::net::SocketAddr::new(
+        proxy
+            .host
+            .parse::<std::net::IpAddr>()
+            .map_err(|_| "the proxy address is not numeric".to_string())?,
+        proxy.port,
+    );
+
+    let mut stream = tokio::time::timeout(timeout, crate::net::connect_tcp(address, mark))
+        .await
+        .map_err(|_| "connect timed out".to_string())?
+        .map_err(|e| e.to_string())?;
 
     crate::proxy::connector::http_plain::HttpPlainConnector::write_absolute_request(
         &mut stream,

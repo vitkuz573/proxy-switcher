@@ -24,7 +24,7 @@ sources = []
 
 [health]
 # The batch is I/O bound, so this is the main throughput lever.
-concurrency = 500
+concurrency = 1000
 # Budget for the proxy handshake. A proxy that will not complete a handshake
 # is dead, and dead proxies are the majority of the pool, so the batch spent
 # most of its time waiting out the full timeout on endpoints that never
@@ -59,7 +59,7 @@ unverified_ttl_secs = 3600
 
 [pool]
 # Hard ceiling on the pool size. The least useful proxies are dropped first.
-max_proxies = 50000
+max_proxies = 300000
 min_score = 0.0
 
 [routing]

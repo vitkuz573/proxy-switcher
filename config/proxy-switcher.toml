@@ -20,26 +20,16 @@ bypass_mark = 0x5053
 [scraper]
 enabled = true
 interval_secs = 300
-sources = [
-    "https://free-proxy-list.net",
-    "https://www.sslproxies.org",
-    "https://www.us-proxy.org",
-    "https://www.proxy-list.download/api/v1/get?type=http",
-    "https://www.proxy-list.download/api/v1/get?type=https",
-    "https://www.proxy-list.download/api/v1/get?type=socks4",
-    "https://www.proxy-list.download/api/v1/get?type=socks5",
-    "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt",
-    "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks4.txt",
-    "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
-    "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
-    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all",
-    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=10000&country=all",
-    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks4&timeout=10000&country=all",
-]
+# Where to look for proxies. The list is a file, not part of the binary, so
+# it can be changed without a rebuild. The repository keeps a ready-made one at
+# config/sources.toml.
+sources_file = "/etc/proxy-switcher/sources.toml"
+# Sources given inline, in addition to the file.
+sources = []
 
 [health]
 # The batch is I/O bound, so this is the main throughput lever.
-concurrency = 500
+concurrency = 1000
 # Budget for the proxy handshake. A proxy that will not complete a handshake
 # is dead, and dead proxies are the majority of the pool, so the batch spent
 # most of its time waiting out the full timeout on endpoints that never
@@ -78,7 +68,7 @@ unverified_ttl_secs = 3600
 
 [pool]
 # Hard ceiling on the pool size. The least useful proxies are dropped first.
-max_proxies = 50000
+max_proxies = 300000
 min_score = 0.0
 
 [routing]

@@ -12,6 +12,7 @@ use proxy_core::proxy::{Anonymity, ProxyInfo, ProxyProtocol};
 use proxy_core::router::Router as ProxyRouter;
 use proxy_core::routing::RoutePolicy;
 use proxy_core::scraper::Scraper;
+use proxy_core::scraper::SourceSpec;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -77,7 +78,7 @@ pub struct AppState {
     pub scraper: Arc<Scraper>,
     pub health: Arc<HealthChecker>,
     pub scrape_state: Arc<RwLock<ScrapeState>>,
-    pub sources: Arc<RwLock<Vec<String>>>,
+    pub sources: Arc<RwLock<Vec<SourceSpec>>>,
     /// Live health-check progress counter, shared with the check loops.
     pub check_progress: Arc<AtomicUsize>,
     /// Guards against overlapping full-pool health-check batches.
@@ -102,6 +103,8 @@ pub struct AppState {
 struct Source {
     id: String,
     url: String,
+    /// The protocol the list is about, when it is known.
+    protocol: Option<ProxyProtocol>,
 }
 
 /// The routing policy in force, and the state of the TUN bypass.
@@ -168,6 +171,8 @@ struct AddProxyInput {
 #[derive(Deserialize)]
 struct AddSourceInput {
     url: String,
+    /// The protocol the list is about, when the list does not say.
+    protocol: Option<ProxyProtocol>,
 }
 
 #[derive(Deserialize, Default)]
@@ -370,12 +375,13 @@ async fn create_proxy(State(state): State<AppState>, Json(input): Json<AddProxyI
         protocol,
         anonymity: Anonymity::Unknown,
         latency_ms: None,
-        country: input.country,
+        country: input.country.map(Into::into),
         last_checked: None,
         last_success: None,
         first_seen: chrono::Utc::now(),
         next_probe_at: chrono::Utc::now(),
         exit_ip: None,
+        password: None,
         supports_tunnel: true,
         consecutive_failures: 0,
         score: 0.0,
@@ -473,9 +479,10 @@ async fn list_sources(State(state): State<AppState>) -> Json<Vec<Source>> {
             .read()
             .await
             .iter()
-            .map(|url| Source {
-                id: source_id(url),
-                url: url.clone(),
+            .map(|spec| Source {
+                id: source_id(&spec.url),
+                url: spec.url.clone(),
+                protocol: spec.protocol,
             })
             .collect(),
     )
@@ -486,7 +493,7 @@ async fn list_sources(State(state): State<AppState>) -> Json<Vec<Source>> {
 /// The list was in memory only, so a source added through the API was gone
 /// after the next restart. The connection is opened for the write and dropped
 /// again, because it is not `Sync`.
-async fn persist_sources(state: &AppState, sources: Vec<String>) {
+async fn persist_sources(state: &AppState, sources: Vec<SourceSpec>) {
     let Some(path) = state.db_path.clone() else {
         return;
     };
@@ -515,10 +522,10 @@ async fn create_source(
     let id = source_id(&url);
     let mut sources = state.sources.write().await;
 
-    if sources.iter().any(|u| source_id(u) == id) {
+    if sources.iter().any(|spec| source_id(&spec.url) == id) {
         return ApiError::conflict("That source is already configured").into_response();
     }
-    sources.push(url.clone());
+    sources.push(SourceSpec::new(url.clone(), input.protocol));
     let snapshot = sources.clone();
 
     drop(sources);
@@ -529,7 +536,11 @@ async fn create_source(
     (
         StatusCode::CREATED,
         [(axum::http::header::LOCATION, location)],
-        Json(Source { id, url }),
+        Json(Source {
+            id,
+            url,
+            protocol: input.protocol,
+        }),
     )
         .into_response()
 }
@@ -540,7 +551,7 @@ async fn delete_source(
 ) -> Result<StatusCode, ApiError> {
     let mut sources = state.sources.write().await;
     let before = sources.len();
-    sources.retain(|u| source_id(u) != id);
+    sources.retain(|spec| source_id(&spec.url) != id);
 
     if sources.len() == before {
         return Err(ApiError::not_found(format!("No source with id {id}")));
@@ -577,24 +588,14 @@ async fn create_scrape_run(State(state): State<AppState>) -> Response {
         s.errors.clear();
         drop(s);
 
-        let discovered = match scraper.scrape_all().await {
-            Ok(p) => p,
-            Err(e) => {
-                error!(%e, "scrape failed");
-                let mut s = scrape_state.write().await;
-                s.running = false;
-                s.errors.push(format!("{e}"));
-                return;
-            }
-        };
-
-        let count = discovered.len();
-        pool.merge(discovered).await;
+        // Straight into the pool: a list of everything the sources returned
+        // would be held twice over.
+        let count = scraper.scrape_into(&pool).await.unwrap_or(0);
 
         // Probe what the pool says is due, exactly like the scheduler does.
         // The old code probed every proxy that had never worked, which on a
         // large pool meant thousands of probes for a manual trigger.
-        let pending = pool.due_for_check(chrono::Utc::now()).await;
+        let pending = pool.due_count(chrono::Utc::now()).await;
         {
             let mut s = scrape_state.write().await;
             s.running = false;
@@ -602,7 +603,7 @@ async fn create_scrape_run(State(state): State<AppState>) -> Response {
             s.proxies_found = pool.len().await;
         }
 
-        if pending.is_empty()
+        if pending == 0
             || check_in_flight
                 .compare_exchange(
                     false,
@@ -621,21 +622,38 @@ async fn create_scrape_run(State(state): State<AppState>) -> Response {
         {
             let mut s = scrape_state.write().await;
             s.check_running = true;
-            s.check_total = pending.len();
+            s.check_total = pending;
         }
 
-        let apply_pool = pool.clone();
-        let batch_schedule = schedule.clone();
+        // The manual trigger probes in rounds too, for the same reason: the
+        // pool is the source, and a copy of it is not needed.
+        let mut working = 0usize;
+        let mut failed = 0usize;
+        let mut inconclusive = 0usize;
 
-        let counts = health
-            .check_batch(&pending, check_progress, move |result| {
-                let pool = apply_pool.clone();
-                let schedule = batch_schedule.clone();
-                async move {
-                    pool.apply_health_result(&result, policy, &schedule).await;
-                }
-            })
-            .await;
+        loop {
+            let round = pool.due_batch(chrono::Utc::now(), 20_000).await;
+            if round.is_empty() {
+                break;
+            }
+
+            // A fresh handle per round: the closure takes ownership of it.
+            let apply_pool = pool.clone();
+            let batch_schedule = schedule.clone();
+            let counts = health
+                .check_batch(&round, check_progress.clone(), move |result| {
+                    let pool = apply_pool.clone();
+                    let schedule = batch_schedule.clone();
+                    async move {
+                        pool.apply_health_result(&result, policy, &schedule).await;
+                    }
+                })
+                .await;
+
+            working += counts.working;
+            failed += counts.failed;
+            inconclusive += counts.inconclusive;
+        }
         check_in_flight.store(false, std::sync::atomic::Ordering::SeqCst);
 
         // One sweep for the whole batch, for the same reason: removal rebuilds
@@ -648,9 +666,9 @@ async fn create_scrape_run(State(state): State<AppState>) -> Response {
 
         info!(
             found = count,
-            working = counts.working,
-            failed = counts.failed,
-            inconclusive = counts.inconclusive,
+            working,
+            failed,
+            inconclusive,
             evicted = evicted_count,
             healthy,
             "scrape run complete"
@@ -685,7 +703,7 @@ async fn get_scrape_run(State(state): State<AppState>) -> Json<ScrapeRun> {
     // so during a run it reported zero while the pool held hundreds of
     // working proxies — and the summary endpoint disagreed with it.
     let healthy_count = state.pool.healthy_count().await;
-    let pending = state.pool.due_for_check(Utc::now()).await.len();
+    let pending = state.pool.due_count(Utc::now()).await;
     let next_due_at = state.pool.next_due_at().await;
 
     Json(ScrapeRun {

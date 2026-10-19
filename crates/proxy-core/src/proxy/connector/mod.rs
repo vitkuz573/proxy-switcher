@@ -14,6 +14,7 @@ pub mod http_plain;
 pub mod https;
 pub mod socks4;
 pub mod socks5;
+pub mod trojan;
 
 use base::{Carriage, ConnectOptions, Target};
 
@@ -102,6 +103,7 @@ impl ConnectorRegistry {
         registry.register(ProxyProtocol::Https, https::HttpsConnector);
         registry.register(ProxyProtocol::Socks5, socks5::Socks5Connector);
         registry.register(ProxyProtocol::Socks4, socks4::Socks4Connector);
+        registry.register(ProxyProtocol::Trojan, trojan::TrojanConnector::default());
 
         registry
     }

@@ -9,7 +9,7 @@ pub struct ProxyInfo {
     pub protocol: ProxyProtocol,
     pub anonymity: Anonymity,
     pub latency_ms: Option<u64>,
-    pub country: Option<String>,
+    pub country: Option<Box<str>>,
     /// When the proxy was last probed, successfully or not.
     pub last_checked: Option<chrono::DateTime<chrono::Utc>>,
     /// When the proxy last actually worked. Drives staleness eviction.
@@ -29,6 +29,16 @@ pub struct ProxyInfo {
     /// cycle. Without this the batch size was the whole unverified pool, and
     /// it grew with every scrape.
     pub next_probe_at: chrono::DateTime<chrono::Utc>,
+    /// The credential a protocol needs.
+    ///
+    /// Trojan and Shadowsocks authenticate with a password rather than a
+    /// handshake, and a proxy list carries it as a URI. The engine keeps it
+    /// with the proxy so the connector can use it.
+    ///
+    /// It is never serialised: a credential does not belong in a listing that
+    /// any viewer of the pool can read.
+    #[serde(default, skip_serializing)]
+    pub password: Option<Box<str>>,
     /// Whether the proxy can carry a tunnel.
     ///
     /// A proxy that only forwards plain HTTP is no use for an arbitrary TCP
@@ -42,8 +52,11 @@ pub struct ProxyInfo {
     /// Two different proxy entries often share one exit address — the same
     /// endpoint published under many names. Seeing the address makes that
     /// visible.
+    ///
+    /// An address rather than a string: it is a fixed size, it needs no
+    /// allocation, and it cannot hold something that is not an address.
     #[serde(default)]
-    pub exit_ip: Option<String>,
+    pub exit_ip: Option<std::net::IpAddr>,
     /// Consecutive failed probes. A single failure never evicts a proxy.
     pub consecutive_failures: u32,
     pub score: f64,
@@ -80,6 +93,8 @@ pub enum ProxyProtocol {
     Https,
     Socks4,
     Socks5,
+    /// Trojan: TLS to the server, then a password and a SOCKS5-style address.
+    Trojan,
 }
 
 impl std::fmt::Display for ProxyProtocol {
@@ -95,6 +110,7 @@ impl ProxyProtocol {
             ProxyProtocol::Https => "https",
             ProxyProtocol::Socks4 => "socks4",
             ProxyProtocol::Socks5 => "socks5",
+            ProxyProtocol::Trojan => "trojan",
         }
     }
 }
@@ -110,6 +126,7 @@ impl std::str::FromStr for ProxyProtocol {
             "https" => Ok(ProxyProtocol::Https),
             "socks4" => Ok(ProxyProtocol::Socks4),
             "socks5" => Ok(ProxyProtocol::Socks5),
+            "trojan" => Ok(ProxyProtocol::Trojan),
             other => Err(format!("unknown protocol: {other}")),
         }
     }
@@ -146,6 +163,7 @@ impl ProxyInfo {
             ProxyProtocol::Https => "https",
             ProxyProtocol::Socks4 => "socks4",
             ProxyProtocol::Socks5 => "socks5",
+            ProxyProtocol::Trojan => "trojan",
         };
         format!("{}://{}:{}", scheme, self.host, self.port)
     }

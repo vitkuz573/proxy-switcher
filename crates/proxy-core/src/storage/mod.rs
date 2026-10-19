@@ -36,6 +36,13 @@ impl Storage {
             );",
         )?;
 
+        // The protocol a source is about was added later, so an existing
+        // database gains the column here.
+        if !self.has_column("sources", "protocol")? {
+            self.conn
+                .execute_batch("ALTER TABLE sources ADD COLUMN protocol TEXT")?;
+        }
+
         // A pool restored from disk is only useful if it knows what has already
         // been confirmed. Without `last_success` every proxy reads as unverified
         // on boot and the whole pool is re-probed from scratch after each
@@ -49,6 +56,7 @@ impl Storage {
             ("first_seen", "TEXT"),
             ("next_probe_at", "TEXT"),
             ("exit_ip", "TEXT"),
+            ("password", "TEXT"),
             ("supports_tunnel", "INTEGER NOT NULL DEFAULT 1"),
         ] {
             if !self.has_column("proxies", column)? {
@@ -75,8 +83,8 @@ impl Storage {
     pub fn save_proxies(&self, proxies: &[ProxyInfo]) -> Result<()> {
         let mut stmt = self.conn.prepare_cached(
             "INSERT OR REPLACE INTO proxies
-             (id, host, port, protocol, anonymity, latency_ms, country, score, last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, supports_tunnel)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             (id, host, port, protocol, anonymity, latency_ms, country, score, last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, password, supports_tunnel)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         )?;
 
         for p in proxies {
@@ -94,7 +102,8 @@ impl Storage {
                 p.consecutive_failures as i64,
                 p.first_seen.to_rfc3339(),
                 p.next_probe_at.to_rfc3339(),
-                p.exit_ip,
+                p.exit_ip.map(|ip| ip.to_string()),
+                p.password,
                 p.supports_tunnel as i64,
             ])?;
         }
@@ -113,8 +122,8 @@ impl Storage {
 
         let mut stmt = tx.prepare_cached(
             "INSERT INTO proxies
-             (id, host, port, protocol, anonymity, latency_ms, country, score, last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, supports_tunnel)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             (id, host, port, protocol, anonymity, latency_ms, country, score, last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, password, supports_tunnel)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         )?;
 
         for p in proxies {
@@ -132,7 +141,8 @@ impl Storage {
                 p.consecutive_failures as i64,
                 p.first_seen.to_rfc3339(),
                 p.next_probe_at.to_rfc3339(),
-                p.exit_ip,
+                p.exit_ip.map(|ip| ip.to_string()),
+                p.password,
                 p.supports_tunnel as i64,
             ])?;
         }
@@ -147,13 +157,16 @@ impl Storage {
     /// The list was held in memory only, so a source added through the API
     /// was gone after the next restart, and the configuration file was the
     /// only truth.
-    pub fn save_sources(&self, sources: &[String]) -> Result<()> {
+    pub fn save_sources(&self, sources: &[crate::scraper::SourceSpec]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("DELETE FROM sources", [])?;
 
-        let mut stmt = tx.prepare("INSERT INTO sources (url) VALUES (?1)")?;
-        for url in sources {
-            stmt.execute(rusqlite::params![url])?;
+        let mut stmt = tx.prepare("INSERT INTO sources (url, protocol) VALUES (?1, ?2)")?;
+        for spec in sources {
+            stmt.execute(rusqlite::params![
+                spec.url,
+                spec.protocol.map(|p| format!("{p:?}"))
+            ])?;
         }
 
         drop(stmt);
@@ -162,9 +175,19 @@ impl Storage {
     }
 
     /// The configured scrape sources.
-    pub fn load_sources(&self) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT url FROM sources ORDER BY url")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    pub fn load_sources(&self) -> Result<Vec<crate::scraper::SourceSpec>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT url, protocol FROM sources ORDER BY url")?;
+        let rows = stmt.query_map([], |row| {
+            let url: String = row.get(0)?;
+            let protocol: Option<String> = row.get(1)?;
+
+            Ok(crate::scraper::SourceSpec {
+                url,
+                protocol: protocol.and_then(|p| p.parse().ok()),
+            })
+        })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -172,7 +195,7 @@ impl Storage {
     pub fn load_proxies(&self) -> Result<Vec<ProxyInfo>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, host, port, protocol, anonymity, latency_ms, country, score,
-                    last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, supports_tunnel
+                    last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, password, supports_tunnel
              FROM proxies",
         )?;
 
@@ -185,6 +208,7 @@ impl Storage {
             let first_seen: Option<String> = row.get(11)?;
             let next_probe_at: Option<String> = row.get(12)?;
             let exit_ip: Option<String> = row.get(13)?;
+            let password: Option<String> = row.get(14)?;
 
             Ok(ProxyInfo {
                 id: row.get(0)?,
@@ -205,11 +229,12 @@ impl Storage {
                 // A proxy restored without a schedule is due at once: it has
                 // not been probed under this schedule yet.
                 next_probe_at: parse_time(next_probe_at).unwrap_or_else(chrono::Utc::now),
-                exit_ip,
+                exit_ip: exit_ip.and_then(|raw| raw.parse().ok()),
+                password: password.map(Into::into),
                 // A row written before the column existed has never been
                 // probed, so it is assumed to tunnel until a probe says
                 // otherwise.
-                supports_tunnel: row.get::<_, Option<i64>>(14)?.unwrap_or(1) != 0,
+                supports_tunnel: row.get::<_, Option<i64>>(15)?.unwrap_or(1) != 0,
                 consecutive_failures: row.get::<_, Option<i64>>(10)?.unwrap_or(0).max(0) as u32,
                 score: row.get(7)?,
             })
@@ -243,12 +268,13 @@ mod tests {
             protocol: ProxyProtocol::Socks5,
             anonymity: Anonymity::Elite,
             latency_ms: Some(120),
-            country: Some("NL".to_string()),
+            country: Some("NL".into()),
             last_checked: Some(chrono::Utc::now()),
             last_success,
             first_seen: chrono::Utc::now(),
             next_probe_at: chrono::Utc::now(),
             exit_ip: None,
+            password: None,
             supports_tunnel: true,
             consecutive_failures: 2,
             score: 0.75,

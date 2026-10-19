@@ -123,6 +123,15 @@ impl ProxyPool {
         let mut inner = self.inner.write().await;
         let mut added = 0usize;
 
+        // The room is made once. Growing a vector of two hundred thousand
+        // records by doubling copies it again and again, and each copy is held
+        // alongside the original until it finishes.
+        let current = inner.proxies.len();
+        let needed = current + discovered.len();
+        if needed > inner.proxies.capacity() {
+            inner.proxies.reserve(needed - current);
+        }
+
         for proxy in discovered {
             match inner.index.get(&proxy.id) {
                 Some(&i) => {
@@ -239,19 +248,38 @@ impl ProxyPool {
         added
     }
 
-    /// Proxies that are due for a probe right now.
+    /// Up to `max` proxies that are due for a probe right now.
     ///
-    /// This is the set the health checker works on. It is bounded by the
-    /// schedule rather than by the pool size: proxies that are not due are
-    /// skipped entirely rather than re-probed and re-deferred.
-    pub async fn due_for_check(&self, now: chrono::DateTime<chrono::Utc>) -> Vec<ProxyInfo> {
+    /// The set is taken in rounds rather than all at once. A pool of two
+    /// hundred thousand proxies cloned in one go is two hundred thousand
+    /// records held twice over, and the copy is pure overhead: the pool is
+    /// already the only place the records live.
+    ///
+    /// The caller asks for another round when it has finished the last one,
+    /// so the memory a check needs is a round rather than the pool.
+    pub async fn due_batch(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        max: usize,
+    ) -> Vec<ProxyInfo> {
         let inner = self.inner.read().await;
         inner
             .proxies
             .iter()
             .filter(|p| p.next_probe_at <= now)
+            .take(max)
             .cloned()
             .collect()
+    }
+
+    /// How many proxies are due for a probe right now.
+    pub async fn due_count(&self, now: chrono::DateTime<chrono::Utc>) -> usize {
+        let inner = self.inner.read().await;
+        inner
+            .proxies
+            .iter()
+            .filter(|p| p.next_probe_at <= now)
+            .count()
     }
 
     /// When the next proxy comes due.
@@ -345,7 +373,7 @@ impl ProxyPool {
                 // The address the traffic leaves from. Many proxy entries share
                 // one exit address, and seeing it makes that visible.
                 if let Some(exit_ip) = result.exit_ip {
-                    proxy.exit_ip = Some(exit_ip.to_string());
+                    proxy.exit_ip = Some(exit_ip);
                 }
                 // Whether the proxy can tunnel is a measured fact, not an
                 // assumption: a proxy that only forwards plain HTTP is no use
@@ -465,19 +493,20 @@ impl ProxyPool {
             .active_index
             .and_then(|i| inner.proxies.get(i).map(|p| p.id.clone()));
 
-        let mut kept = Vec::with_capacity(inner.proxies.len());
-        for proxy in std::mem::take(&mut inner.proxies) {
-            if predicate(&proxy) {
-                kept.push(proxy);
+        // The records are kept in place: taking them out and pushing them
+        // back would allocate a new array and copy every one of them.
+        let mut index = HashMap::with_capacity(inner.proxies.len());
+        let mut position = 0usize;
+
+        inner.proxies.retain_mut(|proxy| {
+            let keep = predicate(proxy);
+            if keep {
+                index.insert(proxy.id.clone(), position);
+                position += 1;
             }
-        }
+            keep
+        });
 
-        let mut index = HashMap::with_capacity(kept.len());
-        for (i, proxy) in kept.iter().enumerate() {
-            index.insert(proxy.id.clone(), i);
-        }
-
-        inner.proxies = kept;
         inner.index = index;
         inner.active_index = active_id.and_then(|id| inner.index.get(&id).copied());
     }
@@ -628,6 +657,7 @@ mod tests {
             first_seen: chrono::Utc::now(),
             next_probe_at: chrono::Utc::now(),
             exit_ip: None,
+            password: None,
             supports_tunnel: true,
             consecutive_failures: 0,
             score: 0.0,
@@ -866,6 +896,7 @@ mod tests {
             next_probe_at: chrono::Utc::now(),
             exit_ip: None,
             supports_tunnel: true,
+            password: None,
             consecutive_failures: 0,
             score: 0.9,
         };
@@ -906,6 +937,7 @@ mod tests {
             next_probe_at: chrono::Utc::now(),
             exit_ip: None,
             supports_tunnel: true,
+            password: None,
             consecutive_failures: 0,
             score: 0.5,
         };
@@ -941,6 +973,7 @@ mod tests {
             next_probe_at: chrono::Utc::now(),
             exit_ip: None,
             supports_tunnel: true,
+            password: None,
             consecutive_failures: 0,
             score: 0.0,
         };
@@ -1011,7 +1044,7 @@ mod tests {
 
         let now = chrono::Utc::now();
         assert_eq!(
-            pool.due_for_check(now).await.len(),
+            pool.due_batch(now, usize::MAX).await.len(),
             2,
             "new proxies are due"
         );
@@ -1021,15 +1054,15 @@ mod tests {
         pool.apply_health_result(&result("a", false, 0), policy, &schedule)
             .await;
 
-        let due = pool.due_for_check(now).await;
+        let due = pool.due_batch(now, usize::MAX).await;
         assert_eq!(due.len(), 1, "a failed proxy must not be due again at once");
         assert_eq!(due[0].id, "b");
 
         // It comes back after the backoff, not before.
         let shortly = now + chrono::Duration::seconds(60);
-        assert_eq!(pool.due_for_check(shortly).await.len(), 1);
+        assert_eq!(pool.due_batch(shortly, usize::MAX).await.len(), 1);
         let after = now + chrono::Duration::seconds(400);
-        assert_eq!(pool.due_for_check(after).await.len(), 2);
+        assert_eq!(pool.due_batch(after, usize::MAX).await.len(), 2);
     }
 
     #[tokio::test]
@@ -1048,15 +1081,15 @@ mod tests {
         pool.apply_health_result(&result("a", true, 50), policy, &schedule)
             .await;
 
-        assert_eq!(pool.due_for_check(now).await.len(), 0);
+        assert_eq!(pool.due_batch(now, usize::MAX).await.len(), 0);
         assert_eq!(
-            pool.due_for_check(now + chrono::Duration::seconds(599))
+            pool.due_batch(now + chrono::Duration::seconds(599), usize::MAX)
                 .await
                 .len(),
             0
         );
         assert_eq!(
-            pool.due_for_check(now + chrono::Duration::seconds(601))
+            pool.due_batch(now + chrono::Duration::seconds(601), usize::MAX)
                 .await
                 .len(),
             1,
@@ -1093,7 +1126,7 @@ mod tests {
 
         // The inconclusive one is due long before the failed one.
         let later = now + chrono::Duration::seconds(200);
-        let due = pool.due_for_check(later).await;
+        let due = pool.due_batch(later, usize::MAX).await;
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].id, "a");
     }

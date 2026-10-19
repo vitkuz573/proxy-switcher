@@ -15,6 +15,7 @@ export const ProxyProtocolSchema = Type.Union([
   Type.Literal("https"),
   Type.Literal("socks4"),
   Type.Literal("socks5"),
+  Type.Literal("trojan"),
 ]);
 export type ProxyProtocol = Static<typeof ProxyProtocolSchema>;
 

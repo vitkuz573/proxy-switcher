@@ -49,7 +49,16 @@ pub struct TunConfig {
 pub struct ScraperConfig {
     pub enabled: bool,
     pub interval_secs: u64,
+    /// Sources given inline.
     pub sources: Vec<String>,
+    /// A file of sources, read at start-up.
+    ///
+    /// Where to look for proxies is configuration, and it changes far more
+    /// often than the code does. Nothing is compiled into the binary: the list
+    /// lives in a file, and a source can be added at run time through the API,
+    /// which is remembered across restarts.
+    #[serde(default)]
+    pub sources_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,11 +170,11 @@ impl Default for Config {
             scraper: ScraperConfig {
                 enabled: true,
                 interval_secs: 300,
-                sources: vec![
-                    "https://free-proxy-list.net".into(),
-                    "https://www.sslproxies.org".into(),
-                    "https://www.us-proxy.org".into(),
-                ],
+                // Where to look for proxies is configuration. The default
+                // points at no list at all, so a deployment has to say what it
+                // wants; the repository keeps a ready-made one.
+                sources: Vec::new(),
+                sources_file: None,
             },
             health: HealthConfig {
                 concurrency: default_concurrency(),

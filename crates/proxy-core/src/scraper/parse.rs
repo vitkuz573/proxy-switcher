@@ -11,6 +11,8 @@ pub enum Format {
     Csv,
     /// A JSON document.
     Json,
+    /// A list of proxy links.
+    Links,
 }
 
 /// What a source says about the protocol, when the format itself does not.
@@ -39,6 +41,19 @@ pub fn detect(body: &str) -> Format {
         return Format::Json;
     }
 
+    // A list of links: every line starts with a scheme.
+    let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+    if !lines.is_empty()
+        && lines.iter().all(|l| {
+            l.contains("://") && l.trim_start().starts_with("trojan")
+                || l.trim_start().starts_with("ss://")
+                || l.trim_start().starts_with("socks5://")
+                || l.trim_start().starts_with("socks4://")
+        })
+    {
+        return Format::Links;
+    }
+
     let lower = body.to_ascii_lowercase();
     if lower.contains("<table") || lower.contains("<html") || lower.contains("<tbody") {
         return Format::Html;
@@ -57,6 +72,7 @@ pub fn detect(body: &str) -> Format {
 /// Parse a body into proxies, whatever the format.
 pub fn parse(body: &str, hint: ProtocolHint) -> Vec<ProxyInfo> {
     match detect(body) {
+        Format::Links => crate::scraper::links::parse_links(body),
         Format::Json => parse_json(body, hint),
         Format::Csv => parse_csv(body, hint),
         Format::PlainText => parse_plain_text(body, hint),
@@ -263,13 +279,14 @@ fn build(
         protocol,
         anonymity: Anonymity::Unknown,
         latency_ms: None,
-        country,
+        country: country.map(Into::into),
         last_checked: None,
         last_success: None,
         first_seen: chrono::Utc::now(),
         next_probe_at: chrono::Utc::now(),
         supports_tunnel: true,
         exit_ip: None,
+        password: None,
         consecutive_failures: 0,
         score: 0.0,
     })

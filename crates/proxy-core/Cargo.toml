@@ -52,4 +52,5 @@ webpki-roots.workspace = true
 
 
 [dev-dependencies]
+rcgen = "0.14.10"
 tempfile = "3"

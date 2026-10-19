@@ -5,8 +5,9 @@ use clap::Parser;
 use proxy_core::config::Config;
 use proxy_core::health::HealthChecker;
 use proxy_core::pool::{EvictionPolicy, ProbeSchedule, ProxyPool};
+use proxy_core::proxy::ProxyProtocol;
 use proxy_core::router::Router;
-use proxy_core::scraper::Scraper;
+use proxy_core::scraper::{Scraper, SourceSpec};
 use proxy_core::storage::Storage;
 use proxy_core::tun_manager::{run_forwarding_loop, TunManager};
 use std::sync::atomic::{AtomicBool, AtomicUsize};
@@ -21,6 +22,92 @@ struct Args {
     #[arg(short, long, default_value = "/etc/proxy-switcher/config.toml")]
     config: String,
 }
+
+/// Read a file of sources.
+///
+/// The file is TOML, so a source can carry a comment explaining why it is
+/// there, and the protocol it is about. The format is deliberately not
+/// compiled into the binary: where to look for proxies changes far more often
+/// than the code does.
+fn load_source_file(path: &std::path::Path) -> anyhow::Result<Vec<SourceSpec>> {
+    let body = std::fs::read_to_string(path)?;
+
+    // Both shapes are accepted: a TOML document of `[[source]]` entries, and
+    // a plain list of addresses, one per line.
+    if body.contains("[[source]]") {
+        #[derive(serde::Deserialize)]
+        struct File {
+            #[serde(default)]
+            source: Vec<Entry>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct Entry {
+            url: String,
+            protocol: Option<String>,
+        }
+
+        let file: File = toml::from_str(&body)?;
+        return Ok(file
+            .source
+            .into_iter()
+            .filter_map(|entry| {
+                let url = entry.url.trim().to_string();
+                if url.is_empty() {
+                    return None;
+                }
+                Some(SourceSpec::new(
+                    url,
+                    parse_protocol(entry.protocol.as_deref()),
+                ))
+            })
+            .collect());
+    }
+
+    let mut sources = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // A line may be "url" or "url,protocol".
+        let url = line.split(',').next().unwrap_or(line).trim();
+        if url.is_empty() {
+            continue;
+        }
+
+        let protocol = line
+            .split_once(',')
+            .map(|(_, protocol)| protocol.trim().to_string());
+
+        let spec = SourceSpec::new(url, parse_protocol(protocol.as_deref()));
+        if !sources.contains(&spec) {
+            sources.push(spec);
+        }
+    }
+
+    Ok(sources)
+}
+
+/// Parse a protocol name.
+fn parse_protocol(name: Option<&str>) -> Option<ProxyProtocol> {
+    match name?.trim().to_ascii_lowercase().as_str() {
+        "http" => Some(ProxyProtocol::Http),
+        "https" => Some(ProxyProtocol::Https),
+        "socks4" => Some(ProxyProtocol::Socks4),
+        "socks5" => Some(ProxyProtocol::Socks5),
+        "trojan" => Some(ProxyProtocol::Trojan),
+        _ => None,
+    }
+}
+
+/// How many proxies one round of the health check takes.
+///
+/// A round is what the check holds in memory at once, so it is a memory
+/// decision as much as a scheduling one. Large enough that the per-round
+/// overhead disappears, small enough that a pool of any size costs the same.
+const ROUND_SIZE: usize = 20_000;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -145,19 +232,55 @@ async fn main() -> anyhow::Result<()> {
 
     // Shared state for API
     //
-    // The stored list wins over the configuration file: a source added
-    // through the API is a deliberate change, and losing it on the next
-    // restart would make the API a lie.
-    let sources = Arc::new(RwLock::new(match db_path.as_ref() {
-        Some(path) => match Storage::open(path).and_then(|s| s.load_sources()) {
-            Ok(stored) if !stored.is_empty() => {
-                info!(count = stored.len(), "scrape sources restored from storage");
-                stored
+    // Three places the list of sources can come from, in this order:
+    //
+    //   1. the file in the repository or the deployment,
+    //   2. the list added at run time through the API, which is remembered,
+    //   3. the inline list in the configuration file.
+    //
+    // Nothing is compiled into the binary. The file is the base list, the API
+    // adds to it, and a deployment that wants no list at all simply says so.
+    let mut sources: Vec<SourceSpec> = config
+        .scraper
+        .sources
+        .iter()
+        .map(|url| SourceSpec::new(url.clone(), None))
+        .collect();
+
+    if let Some(path) = config.scraper.sources_file.as_ref() {
+        match load_source_file(path) {
+            Ok(from_file) => {
+                info!(count = from_file.len(), file = %path.display(), "scrape sources read from file");
+                for source in from_file {
+                    if !sources.contains(&source) {
+                        sources.push(source);
+                    }
+                }
             }
-            _ => config.scraper.sources.clone(),
-        },
-        None => config.scraper.sources.clone(),
-    }));
+            Err(e) => error!(
+                "Could not read the scrape sources from {}: {e}",
+                path.display()
+            ),
+        }
+    }
+
+    if let Some(path) = db_path.as_ref() {
+        match Storage::open(path).and_then(|s| s.load_sources()) {
+            Ok(stored) => {
+                if !stored.is_empty() {
+                    info!(count = stored.len(), "scrape sources restored from storage");
+                    for source in stored {
+                        if !sources.contains(&source) {
+                            sources.push(source);
+                        }
+                    }
+                }
+            }
+            Err(e) => error!("Could not read the scrape sources from storage: {e}"),
+        }
+    }
+
+    let sources = Arc::new(RwLock::new(sources));
     let scraper = Arc::new(Scraper::new(sources.clone()));
     // Shared health-check bookkeeping: a live progress counter and a guard so
     // only one batch runs at a time.
@@ -233,36 +356,33 @@ async fn main() -> anyhow::Result<()> {
                     s.errors.clear();
                     drop(s);
 
-                    match scraper_clone.scrape_all().await {
-                        Ok(proxies) => {
-                            last_scrape = chrono::Utc::now();
-                            {
-                                let mut s = scrape_state_clone.write().await;
-                                s.running = false;
-                                s.last_run = Some(last_scrape);
-                            }
-                            info!("Auto scrape collected {} proxies", proxies.len());
+                    // The results go straight into the pool: a list of two
+                    // hundred thousand proxies would be held twice over.
+                    let added = scraper_clone.scrape_into(&pool_clone).await.unwrap_or(0);
+                    last_scrape = chrono::Utc::now();
 
-                            // Merge rather than replace: proxies already known
-                            // keep their latency, score and failure streak.
-                            let added = pool_clone.merge(proxies).await;
-                            // The capacity was a configuration field nothing
-                            // enforced, so the pool grew with every scrape.
-                            let dropped = pool_clone.enforce_capacity(max_proxies).await;
-                            let pool_total = pool_clone.len().await;
-                            info!(added, dropped, pool_total, "scrape merged into pool");
-                        }
-                        Err(e) => {
-                            error!("Auto scrape cycle failed: {e}");
-                            let mut s = scrape_state_clone.write().await;
-                            s.running = false;
-                            s.errors.push(format!("{e}"));
-                        }
+                    {
+                        let mut s = scrape_state_clone.write().await;
+                        s.running = false;
+                        s.last_run = Some(last_scrape);
                     }
+
+                    // The capacity was a configuration field nothing
+                    // enforced, so the pool grew with every scrape.
+                    let dropped = pool_clone.enforce_capacity(max_proxies).await;
+                    let pool_total = pool_clone.len().await;
+                    info!(added, dropped, pool_total, "scrape cycle merged into pool");
                 }
 
                 // ── Probing: everything the pool says is due ─────────────
-                let due = pool_clone.due_for_check(chrono::Utc::now()).await;
+                //
+                // The pool is asked for the work in rounds rather than handing
+                // over the whole list. A pool of two hundred thousand proxies
+                // cloned in one go is two hundred thousand records held twice
+                // over, and the copy buys nothing: the pool is already the
+                // only place they live.
+                let now = chrono::Utc::now();
+                let due_total = pool_clone.due_count(now).await;
                 let pool_total = pool_clone.len().await;
 
                 {
@@ -270,7 +390,7 @@ async fn main() -> anyhow::Result<()> {
                     s.proxies_found = pool_total;
                 }
 
-                if due.is_empty() {
+                if due_total == 0 {
                     info!(pool_total, "nothing due for a probe");
                 } else {
                     // Only one batch at a time: a second one would contend for
@@ -284,12 +404,14 @@ async fn main() -> anyhow::Result<()> {
                         )
                         .is_err()
                     {
-                        warn!("Health check already in progress, deferring batch");
+                        // Not worth a log line every second: the batch that
+                        // is running is doing the work.
+                        tracing::debug!("Health check already in progress, deferring batch");
                     } else {
                         {
                             let mut s = scrape_state_clone.write().await;
                             s.check_running = true;
-                            s.check_total = due.len();
+                            s.check_total = due_total;
                         }
 
                         let hc = health_clone.clone();
@@ -317,31 +439,60 @@ async fn main() -> anyhow::Result<()> {
                                 std::sync::Mutex<std::collections::HashMap<String, usize>>,
                             > = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
 
-                            let counts = {
-                                let pc = pc.clone();
-                                let reasons = reasons.clone();
-                                hc.check_batch(&due, batch_progress, move |result| {
+                            let mut working = 0usize;
+                            let mut failed = 0usize;
+                            let mut inconclusive = 0usize;
+
+                            // Rounds, until the pool has nothing left that is
+                            // due. Each round is a bounded number of proxies,
+                            // so the memory a check needs is a round and not
+                            // the pool.
+                            loop {
+                                let round = pc.due_batch(chrono::Utc::now(), ROUND_SIZE).await;
+                                if round.is_empty() {
+                                    break;
+                                }
+
+                                let round_size = round.len();
+                                let batch_schedule = batch_schedule.clone();
+                                let counts = {
                                     let pc = pc.clone();
                                     let reasons = reasons.clone();
-                                    let schedule = batch_schedule.clone();
-                                    async move {
-                                        if let Some(reason) = result.error.as_ref() {
-                                            if let Ok(mut map) = reasons.lock() {
-                                                let key = reason
-                                                    .split("connect error")
-                                                    .next()
-                                                    .map(|_| reason.to_string())
-                                                    .unwrap_or_else(|| reason.to_string());
-                                                let key: String = key.chars().take(70).collect();
-                                                *map.entry(key).or_default() += 1;
+                                    hc.check_batch(&round, batch_progress.clone(), move |result| {
+                                        let pc = pc.clone();
+                                        let reasons = reasons.clone();
+                                        let schedule = batch_schedule.clone();
+                                        async move {
+                                            if let Some(reason) = result.error.as_ref() {
+                                                if let Ok(mut map) = reasons.lock() {
+                                                    let key: String =
+                                                        reason.chars().take(48).collect();
+                                                    *map.entry(key).or_default() += 1;
+                                                }
                                             }
-                                        }
-                                        pc.apply_health_result(&result, batch_policy, &schedule)
+                                            pc.apply_health_result(
+                                                &result,
+                                                batch_policy,
+                                                &schedule,
+                                            )
                                             .await;
-                                    }
-                                })
-                                .await
-                            };
+                                        }
+                                    })
+                                    .await
+                                };
+
+                                working += counts.working;
+                                failed += counts.failed;
+                                inconclusive += counts.inconclusive;
+
+                                let total = working + failed + inconclusive;
+                                if total % 20_000 < round_size {
+                                    info!(
+                                        checked = total,
+                                        working, failed, inconclusive, "probe round"
+                                    );
+                                }
+                            }
 
                             if let Ok(map) = reasons.lock() {
                                 let mut ranked: Vec<(&String, &usize)> = map.iter().collect();
@@ -371,10 +522,10 @@ async fn main() -> anyhow::Result<()> {
                             }
 
                             info!(
-                                checked = counts.working + counts.failed + counts.inconclusive,
-                                working = counts.working,
-                                failed = counts.failed,
-                                inconclusive = counts.inconclusive,
+                                checked = working + failed + inconclusive,
+                                working,
+                                failed,
+                                inconclusive,
                                 evicted = evicted_count,
                                 healthy,
                                 pool = pool_size,
@@ -415,7 +566,14 @@ async fn main() -> anyhow::Result<()> {
                         .num_seconds()
                         .max(0) as u64;
 
-                let wait = until_probe.min(until_scrape).max(1).min(scrape_interval);
+                // While a batch is running there is nothing to do but wait for
+                // it, and the next due proxy may be far off. Sleeping a moment
+                // rather than a second keeps the loop from spinning.
+                let wait = if in_flight.load(std::sync::atomic::Ordering::SeqCst) {
+                    5
+                } else {
+                    until_probe.min(until_scrape).max(1).min(scrape_interval)
+                };
                 tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
             }
         });
