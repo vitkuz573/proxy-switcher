@@ -2,7 +2,7 @@
 
 import type { ProxyRecord } from "@proxy-switcher/sdk";
 import { MoreHorizontal, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { useEffect, useMemo, useState, useTransition } from "react";
 import { toast } from "sonner";
 import { AddProxyDialog } from "@/components/add-proxy-dialog";
@@ -35,6 +35,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { useRouter } from "@/i18n/navigation";
 import { api } from "@/lib/client";
 
 type SortKey = "score" | "latency" | "host";
@@ -48,6 +49,7 @@ export function ProxiesTable({
   activeId: string | null;
   canWrite: boolean;
 }) {
+  const t = useTranslations("Proxies");
   const router = useRouter();
   const [proxies, setProxies] = useState(initial);
   const [query, setQuery] = useState("");
@@ -93,10 +95,10 @@ export function ProxiesTable({
   async function onSwitch(id: string, host: string) {
     try {
       await api.setActiveProxy(id);
-      toast.success(`Switched to ${host}`);
+      toast.success(t("switchedTo", { host }));
       refresh();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Switch failed");
+      toast.error(err instanceof Error ? err.message : t("switchFailed"));
     }
   }
 
@@ -107,17 +109,17 @@ export function ProxiesTable({
       toast.success("ProxyRecord removed");
       refresh();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not remove the proxy");
+      toast.error(err instanceof Error ? err.message : t("removeFailed"));
     }
   }
 
   async function onRotate() {
     try {
       await api.rotateActiveProxy();
-      toast.success("Rotated to the next proxy");
+      toast.success(t("rotated"));
       refresh();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Rotate failed");
+      toast.error(err instanceof Error ? err.message : t("rotateFailed"));
     }
   }
 
@@ -129,9 +131,9 @@ export function ProxiesTable({
           <Input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Filter by host, port, protocol or country"
+            placeholder={t("filter")}
             className="pl-8"
-            aria-label="Filter proxies"
+            aria-label={t("filterLabel")}
           />
         </div>
 
@@ -143,7 +145,7 @@ export function ProxiesTable({
               variant={sort === key ? "secondary" : "ghost"}
               onClick={() => setSort(key)}
             >
-              {key}
+              {t(`sort.${key}`)}
             </Button>
           ))}
         </div>
@@ -167,13 +169,13 @@ export function ProxiesTable({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Endpoint</TableHead>
-                <TableHead>Protocol</TableHead>
-                <TableHead>Anonymity</TableHead>
-                <TableHead className="text-right">Latency</TableHead>
-                <TableHead className="text-right">Score</TableHead>
-                <TableHead>Egress</TableHead>
-                <TableHead>Checked</TableHead>
+                <TableHead>{t("columns.endpoint")}</TableHead>
+                <TableHead>{t("columns.protocol")}</TableHead>
+                <TableHead>{t("columns.anonymity")}</TableHead>
+                <TableHead className="text-right">{t("columns.latency")}</TableHead>
+                <TableHead className="text-right">{t("columns.score")}</TableHead>
+                <TableHead>{t("columns.egress")}</TableHead>
+                <TableHead>{t("columns.checked")}</TableHead>
                 <TableHead className="w-12" />
               </TableRow>
             </TableHeader>
@@ -216,7 +218,7 @@ export function ProxiesTable({
                             onClick={() => onSwitch(proxy.id, `${proxy.host}:${proxy.port}`)}
                             disabled={proxy.id === activeId}
                           >
-                            Switch to this proxy
+                            {t("switchTo")}
                           </DropdownMenuItem>
                           <DeleteProxyDialog
                             endpoint={`${proxy.host}:${proxy.port}`}
@@ -232,9 +234,7 @@ export function ProxiesTable({
               {visible.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={8} className="h-24 text-center text-muted-foreground">
-                    {proxies.length === 0
-                      ? "No proxies in the pool. Trigger a scrape or add one manually."
-                      : "Nothing matches this filter."}
+                    {proxies.length === 0 ? t("empty") : t("noMatch")}
                   </TableCell>
                 </TableRow>
               ) : null}
@@ -256,24 +256,25 @@ export function ProxiesTable({
 }
 
 function DeleteProxyDialog({ endpoint, onConfirm }: { endpoint: string; onConfirm: () => void }) {
+  const t = useTranslations("Proxies");
+  const tCommon = useTranslations("Common");
+
   return (
     <AlertDialog>
       <AlertDialogTrigger asChild>
         <DropdownMenuItem onSelect={(event) => event.preventDefault()} className="text-destructive">
           <Trash2 />
-          Remove
+          {t("removeAction")}
         </DropdownMenuItem>
       </AlertDialogTrigger>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Remove {endpoint}?</AlertDialogTitle>
-          <AlertDialogDescription>
-            The proxy is deleted from the engine pool. It may return on the next scrape.
-          </AlertDialogDescription>
+          <AlertDialogTitle>{t("removeTitle", { endpoint })}</AlertDialogTitle>
+          <AlertDialogDescription>{t("removeDescription")}</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction onClick={onConfirm}>Remove</AlertDialogAction>
+          <AlertDialogCancel>{tCommon("actions.cancel")}</AlertDialogCancel>
+          <AlertDialogAction onClick={onConfirm}>{t("removeAction")}</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

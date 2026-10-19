@@ -1,6 +1,7 @@
 "use client";
 
 import type { PoolStatistics } from "@proxy-switcher/sdk";
+import { useFormatter, useTranslations } from "next-intl";
 import {
   Area,
   AreaChart,
@@ -40,26 +41,26 @@ const PALETTE = [
 ];
 
 const HISTORY_CONFIG = {
-  pool: { label: "В пуле", color: PALETTE[0] },
-  working: { label: "Рабочих", color: PALETTE[1] },
+  pool: { label: "pool", color: PALETTE[0] },
+  working: { label: "working", color: PALETTE[1] },
 } satisfies ChartConfig;
 
 const PROTOCOL_CONFIG = {
-  count: { label: "Прокси" },
-  working: { label: "Рабочих" },
+  count: { label: "proxies" },
+  working: { label: "working" },
 } satisfies ChartConfig;
 
 const ANONYMITY_CONFIG = {
-  count: { label: "Прокси" },
+  count: { label: "proxies" },
 } satisfies ChartConfig;
 
 const LATENCY_CONFIG = {
-  count: { label: "Прокси" },
+  count: { label: "proxies" },
 } satisfies ChartConfig;
 
 const COUNTRY_CONFIG = {
-  count: { label: "Прокси" },
-  working: { label: "Рабочих" },
+  count: { label: "proxies" },
+  working: { label: "working" },
 } satisfies ChartConfig;
 
 /** A number with thousands separated, so the axis is readable. */
@@ -74,9 +75,12 @@ function compact(value: number): string {
 }
 
 export function PoolStatisticsCharts({ statistics }: { statistics: PoolStatistics }) {
+  const t = useTranslations("Statistics.charts");
+  const format = useFormatter();
+
   const history = statistics.history.map((sample) => ({
     ...sample,
-    at: new Date(sample.at).toLocaleTimeString("ru-RU", {
+    at: format.dateTime(new Date(sample.at), {
       hour: "2-digit",
       minute: "2-digit",
     }),
@@ -107,10 +111,8 @@ export function PoolStatisticsCharts({ statistics }: { statistics: PoolStatistic
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       <section className="lg:col-span-2 rounded-xl border p-4">
-        <h2 className="text-sm font-medium">Пул во времени</h2>
-        <p className="text-xs text-muted-foreground">
-          Сколько прокси в пуле и сколько из них подтверждено рабочими.
-        </p>
+        <h2 className="text-sm font-medium">{t("historyTitle")}</h2>
+        <p className="text-xs text-muted-foreground">{t("historyDescription")}</p>
         {history.length > 1 ? (
           <ChartContainer config={HISTORY_CONFIG} className="h-64 w-full">
             <AreaChart data={history}>
@@ -143,17 +145,13 @@ export function PoolStatisticsCharts({ statistics }: { statistics: PoolStatistic
             </AreaChart>
           </ChartContainer>
         ) : (
-          <p className="py-16 text-center text-sm text-muted-foreground">
-            История накапливается: первый замер через минуту.
-          </p>
+          <p className="py-16 text-center text-sm text-muted-foreground">{t("historyEmpty")}</p>
         )}
       </section>
 
       <section className="rounded-xl border p-4">
-        <h2 className="text-sm font-medium">По протоколам</h2>
-        <p className="text-xs text-muted-foreground">
-          Сколько прокси каждого протокола и сколько из них работает.
-        </p>
+        <h2 className="text-sm font-medium">{t("protocolTitle")}</h2>
+        <p className="text-xs text-muted-foreground">{t("protocolDescription")}</p>
         <ChartContainer config={PROTOCOL_CONFIG} className="h-64 w-full">
           <BarChart data={protocols} layout="vertical" margin={{ left: 8 }}>
             <CartesianGrid horizontal={false} />
@@ -174,10 +172,8 @@ export function PoolStatisticsCharts({ statistics }: { statistics: PoolStatistic
       </section>
 
       <section className="rounded-xl border p-4">
-        <h2 className="text-sm font-medium">По анонимности</h2>
-        <p className="text-xs text-muted-foreground">
-          Что прокси выдаёт о клиенте: адрес, себя или ничего.
-        </p>
+        <h2 className="text-sm font-medium">{t("anonymityTitle")}</h2>
+        <p className="text-xs text-muted-foreground">{t("anonymityDescription")}</p>
         <ChartContainer config={ANONYMITY_CONFIG} className="h-64 w-full">
           <PieChart>
             <ChartTooltip content={<ChartTooltipContent hideLabel />} />
@@ -199,10 +195,8 @@ export function PoolStatisticsCharts({ statistics }: { statistics: PoolStatistic
       </section>
 
       <section className="rounded-xl border p-4">
-        <h2 className="text-sm font-medium">Задержка</h2>
-        <p className="text-xs text-muted-foreground">
-          Сколько времени занимает ответ через прокси.
-        </p>
+        <h2 className="text-sm font-medium">{t("latencyTitle")}</h2>
+        <p className="text-xs text-muted-foreground">{t("latencyDescription")}</p>
         <ChartContainer config={LATENCY_CONFIG} className="h-64 w-full">
           <BarChart data={latency} margin={{ left: 8 }}>
             <CartesianGrid vertical={false} />
@@ -228,10 +222,8 @@ export function PoolStatisticsCharts({ statistics }: { statistics: PoolStatistic
       </section>
 
       <section className="rounded-xl border p-4">
-        <h2 className="text-sm font-medium">По странам</h2>
-        <p className="text-xs text-muted-foreground">
-          Сколько прокси указано за ту или иную страну.
-        </p>
+        <h2 className="text-sm font-medium">{t("countryTitle")}</h2>
+        <p className="text-xs text-muted-foreground">{t("countryDescription")}</p>
         <ChartContainer config={COUNTRY_CONFIG} className="h-64 w-full">
           <BarChart data={countries} layout="vertical" margin={{ left: 8 }}>
             <CartesianGrid horizontal={false} />

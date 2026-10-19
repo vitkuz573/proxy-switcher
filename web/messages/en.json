@@ -1,0 +1,184 @@
+{
+  "Metadata": {
+    "title": "Proxy Switcher",
+    "description": "System-wide IP switching through public proxies"
+  },
+  "Common": {
+    "loading": "Loading",
+    "never": "Never",
+    "idle": "idle",
+    "running": "running",
+    "checking": "checking",
+    "unknown": "unknown",
+    "none": "None",
+    "all": "All",
+    "actions": {
+      "add": "Add",
+      "remove": "Remove",
+      "cancel": "Cancel",
+      "rotate": "Rotate",
+      "switch": "Switch",
+      "refresh": "Refresh",
+      "signOut": "Sign out"
+    },
+    "errors": {
+      "unreachable": "The engine is unreachable",
+      "generic": "Something went wrong"
+    }
+  },
+  "Nav": {
+    "group": "Control",
+    "dashboard": "Dashboard",
+    "proxies": "Proxies",
+    "scraper": "Scraper",
+    "statistics": "Statistics",
+    "audit": "Audit",
+    "language": "Language"
+  },
+  "Login": {
+    "title": "Sign in",
+    "subtitle": "Sign in to the control plane.",
+    "email": "Email",
+    "password": "Password",
+    "submit": "Sign in",
+    "failed": "Sign in failed",
+    "success": "Signed in",
+    "unreachable": "Cannot reach the API service"
+  },
+  "Dashboard": {
+    "title": "Dashboard",
+    "subtitle": "System-wide IP switching through public proxies.",
+    "poolSize": "Pool size",
+    "poolSizeHint": "proxies in the engine pool",
+    "healthy": "Healthy",
+    "healthyHint": "confirmed reachable",
+    "tcpConnections": "TCP connections",
+    "tcpConnectionsHint": "active forwards",
+    "dnsCache": "DNS cache",
+    "dnsCacheHint": "resolved names",
+    "routing": "Proxied traffic",
+    "routingNone": "No traffic goes through a proxy. A proxy is a tool for specific destinations, not a default route."
+  },
+  "Proxies": {
+    "title": "Proxies",
+    "filter": "Filter by host, port, protocol or country",
+    "filterLabel": "Filter proxies",
+    "sort": {
+      "score": "score",
+      "latency": "latency",
+      "host": "host"
+    },
+    "add": "Add proxy",
+    "rotate": "Rotate",
+    "columns": {
+      "endpoint": "Endpoint",
+      "protocol": "Protocol",
+      "anonymity": "Anonymity",
+      "latency": "Latency",
+      "score": "Score",
+      "egress": "Egress",
+      "checked": "Checked",
+      "actions": "Actions"
+    },
+    "empty": "No proxies in the pool. Trigger a scrape or add one manually.",
+    "noMatch": "Nothing matches this filter.",
+    "switchedTo": "Switched to {host}",
+    "switchFailed": "Switch failed",
+    "removed": "Proxy removed",
+    "removeFailed": "Could not remove the proxy",
+    "rotated": "Rotated to the next proxy",
+    "rotateFailed": "Rotate failed",
+    "removeTitle": "Remove {endpoint}?",
+    "removeDescription": "The proxy is deleted from the engine pool. It may return on the next scrape.",
+    "addDialog": {
+      "title": "Add a proxy",
+      "host": "Host or IP",
+      "port": "Port",
+      "protocol": "Protocol",
+      "country": "Country",
+      "submit": "Add",
+      "portRange": "Port must be between 1 and 65535",
+      "failed": "Could not add the proxy"
+    },
+    "switchTo": "Switch to this proxy",
+    "removeAction": "Remove"
+  },
+  "Scraper": {
+    "title": "Scraper",
+    "subtitle": "Discovery and health checking of the proxy pool.",
+    "cardTitle": "Scraper",
+    "neverRun": "Never run",
+    "lastRun": "Last run {time}",
+    "scrapeNow": "Scrape now",
+    "started": "Scrape started",
+    "triggerFailed": "Could not trigger a scrape",
+    "metrics": {
+      "found": "Proxies found",
+      "healthy": "Healthy",
+      "due": "Due",
+      "errors": "Errors"
+    },
+    "healthCheck": "Health check",
+    "progress": "{checked} / {total} ({percent}%)",
+    "nextDue": "Next probe due {time}",
+    "errorsTitle": "Last cycle reported errors",
+    "sources": {
+      "title": "Scrape sources",
+      "url": "Source URL",
+      "add": "Add",
+      "added": "Source added",
+      "addFailed": "Could not add the source",
+      "removed": "Source removed",
+      "removeFailed": "Could not remove the source",
+      "empty": "No sources configured. The built-in defaults are used when the list is empty."
+    },
+    "state": {
+      "idle": "idle",
+      "running": "running",
+      "checking": "checking"
+    }
+  },
+  "Statistics": {
+    "title": "Pool statistics",
+    "subtitle": "The distribution of proxies by protocol, anonymity, latency and country.",
+    "unavailable": "The engine is unreachable.",
+    "metrics": {
+      "pool": "In the pool",
+      "working": "Working",
+      "tunnel": "With a tunnel",
+      "due": "Waiting for a probe"
+    },
+    "charts": {
+      "historyTitle": "Pool over time",
+      "historyDescription": "How many proxies the pool holds and how many of them are confirmed working.",
+      "protocolTitle": "By protocol",
+      "protocolDescription": "How many proxies of each protocol, and how many of them work.",
+      "anonymityTitle": "By anonymity",
+      "anonymityDescription": "What a proxy reveals about the client: the address, itself, or nothing.",
+      "latencyTitle": "Latency",
+      "latencyDescription": "How long a reply through a proxy takes.",
+      "countryTitle": "By country",
+      "countryDescription": "How many proxies are listed for each country.",
+      "pool": "In the pool",
+      "working": "Working",
+      "proxies": "Proxies",
+      "historyEmpty": "The history is filling up: the first sample is a minute away."
+    },
+    "exitAddresses": "{count} distinct exit addresses — that is how many proxies there really are among {total} entries."
+  },
+  "Audit": {
+    "title": "Audit",
+    "subtitle": "Every mutating action and denied request, newest first.",
+    "columns": {
+      "when": "When",
+      "actor": "Actor",
+      "action": "Action",
+      "target": "Target",
+      "outcome": "Outcome",
+      "detail": "Detail"
+    },
+    "empty": "Nothing recorded yet.",
+    "allowed": "allowed",
+    "denied": "denied"
+  }
+}

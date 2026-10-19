@@ -2,15 +2,18 @@
 
 import type { Problem } from "@proxy-switcher/sdk";
 import { Server } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { type FormEvent, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useRouter } from "@/i18n/navigation";
 
 export function LoginForm() {
+  const t = useTranslations("Login");
+  const tMeta = useTranslations("Metadata");
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -32,15 +35,15 @@ export function LoginForm() {
 
       if (!response.ok) {
         const problem = (await response.json().catch(() => null)) as Problem | null;
-        setError(problem?.detail ?? "Sign in failed");
+        setError(problem?.detail ?? t("failed"));
         return;
       }
 
-      toast.success("Signed in");
+      toast.success(t("success"));
       router.push("/dashboard");
       router.refresh();
     } catch {
-      setError("Cannot reach the API service");
+      setError(t("unreachable"));
     } finally {
       setPending(false);
     }
@@ -51,14 +54,14 @@ export function LoginForm() {
       <CardHeader>
         <div className="mb-2 flex items-center gap-2">
           <Server className="size-5" />
-          <CardTitle>Proxy Switcher</CardTitle>
+          <CardTitle>{tMeta("title")}</CardTitle>
         </div>
-        <CardDescription>Sign in to the control plane.</CardDescription>
+        <CardDescription>{t("subtitle")}</CardDescription>
       </CardHeader>
       <CardContent>
         <form onSubmit={onSubmit} className="grid gap-4">
           <div className="grid gap-2">
-            <Label htmlFor="email">Email</Label>
+            <Label htmlFor="email">{t("email")}</Label>
             <Input
               id="email"
               type="email"
@@ -70,7 +73,7 @@ export function LoginForm() {
           </div>
 
           <div className="grid gap-2">
-            <Label htmlFor="password">Password</Label>
+            <Label htmlFor="password">{t("password")}</Label>
             <Input
               id="password"
               type="password"
@@ -88,7 +91,7 @@ export function LoginForm() {
           ) : null}
 
           <Button type="submit" disabled={pending}>
-            {pending ? "Signing in…" : "Sign in"}
+            {pending ? `${t("submit")}…` : t("submit")}
           </Button>
         </form>
       </CardContent>

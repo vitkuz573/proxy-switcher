@@ -7,7 +7,7 @@
     "ps": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && cp -r messages dist/messages",
     "typecheck": "tsc --noEmit",
     "dev": "tsx src/index.ts"
   },
@@ -19,5 +19,9 @@
     "@types/node": "^26",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
-  }
+  },
+  "files": [
+    "dist",
+    "messages"
+  ]
 }

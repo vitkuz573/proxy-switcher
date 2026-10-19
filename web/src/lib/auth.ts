@@ -1,6 +1,7 @@
 import "server-only";
 import { cookies } from "next/headers";
-import { redirect } from "next/navigation";
+import { getLocale } from "next-intl/server";
+import { redirect } from "@/i18n/navigation";
 import { API_INTERNAL_URL, SESSION_COOKIE } from "./env";
 
 export interface SessionUser {
@@ -19,9 +20,10 @@ export interface SessionUser {
  */
 export async function getCurrentUser(): Promise<SessionUser> {
   const session = (await cookies()).get(SESSION_COOKIE)?.value;
+  const locale = await getLocale();
 
   if (!session) {
-    redirect("/login");
+    redirect({ href: "/login", locale });
   }
 
   const response = await fetch(`${API_INTERNAL_URL}/api/v1/sessions/current`, {
@@ -31,7 +33,7 @@ export async function getCurrentUser(): Promise<SessionUser> {
 
   if (response.status === 401 || response.status === 403) {
     // The cookie exists but is no longer valid; drop it on the way out.
-    redirect("/login");
+    redirect({ href: "/login", locale });
   }
 
   if (!response.ok) {

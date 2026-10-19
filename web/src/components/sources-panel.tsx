@@ -2,12 +2,13 @@
 
 import type { Source } from "@proxy-switcher/sdk";
 import { Plus, Trash2 } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { type FormEvent, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { useRouter } from "@/i18n/navigation";
 import { api } from "@/lib/client";
 
 /**
@@ -15,6 +16,7 @@ import { api } from "@/lib/client";
  * The API enforces that too; hiding the control is only a convenience.
  */
 export function SourcesPanel({ initial, canManage }: { initial: Source[]; canManage: boolean }) {
+  const t = useTranslations("Scraper.sources");
   const router = useRouter();
   const [sources, setSources] = useState(initial);
   const [url, setUrl] = useState("");
@@ -34,11 +36,11 @@ export function SourcesPanel({ initial, canManage }: { initial: Source[]; canMan
     setPending(true);
     try {
       await api.createSource(trimmed);
-      toast.success("Source added");
+      toast.success(t("added"));
       setUrl("");
       refresh();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not add the source");
+      toast.error(err instanceof Error ? err.message : t("addFailed"));
     } finally {
       setPending(false);
     }
@@ -50,18 +52,18 @@ export function SourcesPanel({ initial, canManage }: { initial: Source[]; canMan
     try {
       // Sources are addressed by their stable id; the URL is data, not identity.
       await api.deleteSource(id);
-      toast.success("Source removed");
+      toast.success(t("removed"));
       refresh();
     } catch (err) {
       setSources(previous);
-      toast.error(err instanceof Error ? err.message : "Could not remove the source");
+      toast.error(err instanceof Error ? err.message : t("removeFailed"));
     }
   }
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Scrape sources</CardTitle>
+        <CardTitle className="text-base">{t("title")}</CardTitle>
       </CardHeader>
       <CardContent className="grid gap-4">
         {canManage ? (
@@ -70,7 +72,7 @@ export function SourcesPanel({ initial, canManage }: { initial: Source[]; canMan
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               placeholder="https://example.com/proxy-list.txt"
-              aria-label="Source URL"
+              aria-label={t("url")}
             />
             <Button type="submit" disabled={pending}>
               <Plus />

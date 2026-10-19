@@ -1,36 +1,111 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline/promises";
-import { Command } from "commander";
+import { Command, Help, type Option } from "commander";
 import { anonymousClient, CliError, cliCall, client } from "./client.js";
 import { configPath, loadConfig, saveConfig } from "./config.js";
 import { dim, green, heading, keyValue, red, table, truncate } from "./format.js";
+import { resolveLocale, translator } from "./i18n.js";
 import { runCli } from "./run.js";
+
+/**
+ * The language for this run.
+ *
+ * It is resolved before the command tree is built, because the help text is
+ * part of that tree: a Russian `--help` should be in Russian too, and the
+ * global option is only known once the arguments have been parsed.
+ */
+const locale = resolveLocale(localeArgument(process.argv));
+const t = translator(locale);
+
+/** The value of the global `--locale` option, read straight from the arguments. */
+function localeArgument(argv: string[]): string | undefined {
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index] ?? "";
+
+    if (argument === "--locale" || argument === "-l") {
+      return argv[index + 1];
+    }
+    if (argument.startsWith("--locale=")) {
+      return argument.slice("--locale=".length);
+    }
+  }
+  return undefined;
+}
 
 const program = new Command();
 
+// The help is part of the interface, so it is translated too.
+//
+// Commander writes the section headings itself — "Usage:", "Options:",
+// "Commands:" — and the descriptions of the options it adds itself are English
+// as well. The formatter is therefore given these overrides: they are own
+// properties of the configuration, which is how commander copies them onto its
+// help object.
+const baseHelp = new Help();
+
+program.configureHelp({
+  formatItemList(this: Help, heading: string, items: string[], helper: Help): string[] {
+    return baseHelp.formatItemList.call(this, translateHeading(heading), items, helper);
+  },
+
+  styleTitle(this: Help, title: string): string {
+    return baseHelp.styleTitle.call(this, translateHeading(title));
+  },
+
+  optionDescription(this: Help, option: Option): string {
+    // The descriptions commander writes for the options it adds itself.
+    const key = BUILTIN_OPTION_DESCRIPTIONS[option.description ?? ""];
+    return key ? t(key) : (option.description ?? "");
+  },
+});
+
+/** The descriptions commander writes for the options it adds itself. */
+const BUILTIN_OPTION_DESCRIPTIONS: Record<string, string> = {
+  "output the version number": "help.version",
+  "display help for command": "help.option",
+  "display help": "help.option",
+};
+
+/**
+ * Translate a heading commander writes.
+ *
+ * The translation has to be idempotent: a heading that has already been
+ * translated comes back through the formatter a second time, and translating it
+ * again would look for a key that does not exist.
+ */
+function translateHeading(heading: string): string {
+  const key = heading
+    .replace(/[:\s]+$/, "")
+    .toLowerCase()
+    .replace(/\s+/g, "-");
+  const name = key === "global-options" ? "options" : key;
+
+  return t.maybe(`help.${name}`) ?? heading;
+}
+
 program
   .name("ps")
-  .description("Control the proxy-switcher engine")
+  .description(t("common.description"))
   .version("2.0.0")
-  .option("-u, --url <url>", "API base URL");
+  .option("-u, --url <url>", t("common.apiUrl"))
+  .option("--locale <locale>", t("common.locale"));
 
 program
   .command("auth")
-  .description("Credential management")
+  .description(t("auth.group"))
   .addCommand(
     new Command("login")
-      .description("Exchange email and password for an API token")
-      .option("-e, --email <email>", "account email")
-      .option("-p, --password <password>", "account password")
-      .option("--url <url>", "API base URL")
+      .description(t("auth.login.description"))
+      .option("-e, --email <email>", t("auth.login.email"))
+      .option("-p, --password <password>", t("auth.login.password"))
+      .option("--url <url>", t("common.apiUrl"))
       .action(async (options: { email?: string; password?: string; url?: string }) => {
         await runCli(async () => {
-          const email = options.email ?? (await prompt("Email: "));
-          const password = options.password ?? (await prompt("Password: ", true));
+          const email = options.email ?? (await prompt(t("auth.login.emailPrompt")));
+          const password = options.password ?? (await prompt(t("auth.login.passwordPrompt"), true));
 
-          const granted = await cliCall(() =>
-            anonymousClient(options.url).exchangeToken({ email, password }),
-          );
+          const api = anonymousClient(options.url);
+          const granted = await cliCall(() => api.exchangeToken({ email, password }));
 
           saveConfig({
             baseUrl: options.url ?? loadConfig().baseUrl,
@@ -38,34 +113,42 @@ program
           });
 
           console.log(
-            `\n  ${green("✓")} Signed in as ${granted.user.email} (${granted.user.role})`,
+            `\n  ${green("✓")} ${t("auth.login.signedIn", {
+              email: granted.user.email,
+              role: granted.user.role,
+            })}`,
           );
-          console.log(`  ${dim(`token ${granted.api_token.prefix} stored in ${configPath()}`)}`);
+          console.log(
+            `  ${dim(t("auth.login.tokenStored", { prefix: granted.api_token.prefix, path: configPath() }))}`,
+          );
         });
       }),
   )
   .addCommand(
-    new Command("status").description("Show which token is stored").action(async () => {
+    new Command("status").description(t("auth.status.description")).action(async () => {
       await runCli(async () => {
         const config = loadConfig();
-        keyValue("API URL", config.baseUrl);
-        keyValue("Token", config.token ? green("stored") : red("missing"));
-        keyValue("Config", configPath());
+        keyValue(t("auth.status.apiUrl"), config.baseUrl);
+        keyValue(
+          t("auth.status.token"),
+          config.token ? green(t("auth.status.stored")) : red(t("auth.status.missing")),
+        );
+        keyValue(t("auth.status.config"), configPath());
       });
     }),
   )
   .addCommand(
-    new Command("logout").description("Forget the stored token").action(async () => {
+    new Command("logout").description(t("auth.logout.description")).action(async () => {
       await runCli(async () => {
         saveConfig({ baseUrl: loadConfig().baseUrl });
-        console.log(`  ${green("✓")} Token removed`);
+        console.log(`  ${green("✓")} ${t("auth.logout.done")}`);
       });
     }),
   );
 
 program
   .command("status")
-  .description("Active proxy and pool size")
+  .description(t("status.description"))
   .action(async () => {
     await runCli(async () => {
       const api = client();
@@ -74,35 +157,35 @@ program
         cliCall(() => api.getStats()),
       ]);
 
-      heading("Engine");
-      keyValue("Pool size", summary.pool_size);
-      keyValue("Healthy", summary.healthy_count);
-      keyValue("TCP connections", stats.tcp_connections);
-      keyValue("UDP flows", stats.udp_flows);
-      keyValue("DNS cache entries", stats.dns_cache_size);
+      heading(t("status.engine"));
+      keyValue(t("status.poolSize"), summary.pool_size);
+      keyValue(t("status.healthy"), stats.healthy_count);
+      keyValue(t("status.tcpConnections"), stats.tcp_connections);
+      keyValue(t("status.udpFlows"), stats.udp_flows);
+      keyValue(t("status.dnsCache"), stats.dns_cache_size);
 
-      heading("Active proxy");
+      heading(t("status.activeProxy"));
       if (!summary.active_proxy) {
-        console.log(`  ${dim("none selected")}`);
+        console.log(`  ${dim(t("status.noneSelected"))}`);
         return;
       }
       const p = summary.active_proxy;
-      keyValue("Endpoint", `${p.host}:${p.port}`);
-      keyValue("Protocol", p.protocol);
-      keyValue("Anonymity", p.anonymity);
-      keyValue("Latency", p.latency_ms === null ? null : `${p.latency_ms} ms`);
-      keyValue("Score", p.score.toFixed(1));
+      keyValue(t("status.endpoint"), `${p.host}:${p.port}`);
+      keyValue(t("status.protocol"), p.protocol);
+      keyValue(t("status.anonymity"), p.anonymity);
+      keyValue(t("status.latency"), p.latency_ms === null ? null : `${p.latency_ms} ms`);
+      keyValue(t("status.score"), p.score.toFixed(1));
     });
   });
 
-const proxies = program.command("proxies").description("Manage the proxy pool");
+const proxies = program.command("proxies").description(t("proxies.group"));
 
 proxies
   .command("list", { isDefault: true })
-  .description("List proxies")
-  .option("-s, --search <text>", "filter by host or country")
-  .option("-n, --limit <count>", "maximum rows", "25")
-  .option("--sort <key>", "score | latency | host", "score")
+  .description(t("proxies.list.description"))
+  .option("-s, --search <text>", t("proxies.list.search"))
+  .option("-n, --limit <count>", t("proxies.list.limit"), "25")
+  .option("--sort <key>", t("proxies.list.sort"), "score")
   .action(async (options: { search?: string; limit: string; sort: string }) => {
     await runCli(async () => {
       const api = client();
@@ -116,12 +199,12 @@ proxies
       );
       const summary = await cliCall(() => api.getSummary());
 
-      heading(`Proxies (${rows.length})`);
+      heading(t("proxies.list.title", { shown: rows.length, total: summary.pool_size }));
       table(
-        ["", "ENDPOINT", "PROTO", "LATENCY", "SCORE"],
+        t.list("proxies.list.columns"),
         rows.map((p) => [
           p.id === summary.active_proxy?.id ? "*" : " ",
-          truncate(p.id, 26),
+          truncate(`${p.host}:${p.port}`, 26),
           truncate(p.protocol, 7),
           p.latency_ms === null ? "—" : `${p.latency_ms} ms`,
           p.score.toFixed(1),
@@ -132,11 +215,11 @@ proxies
 
 proxies
   .command("add")
-  .description("Add a proxy manually")
-  .argument("<host>", "hostname or IP")
-  .argument("<port>", "port number")
-  .argument("[protocol]", "http | https | socks4 | socks5", "http")
-  .option("--country <code>", "country label")
+  .description(t("proxies.add.description"))
+  .argument("<host>", t("proxies.add.host"))
+  .argument("<port>", t("proxies.add.port"))
+  .argument("[protocol]", t("proxies.add.protocol"), "http")
+  .option("--country <code>", t("proxies.add.country"))
   .action(
     async (
       host: string,
@@ -147,7 +230,7 @@ proxies
       await runCli(async () => {
         const portNumber = Number(port);
         if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
-          throw new CliError("Port must be an integer between 1 and 65535.");
+          throw new CliError(t("proxies.add.badPort"));
         }
 
         const proxy = await cliCall(() =>
@@ -158,54 +241,54 @@ proxies
             ...(options.country ? { country: options.country } : {}),
           }),
         );
-        console.log(`  ${green("✓")} Added ${proxy.id} to the pool`);
+        console.log(`  ${green("✓")} ${t("proxies.add.done", { id: proxy.id })}`);
       });
     },
   );
 
 proxies
   .command("remove")
-  .description("Remove a proxy from the pool")
-  .argument("<id>", "proxy id, i.e. host:port")
+  .description(t("proxies.remove.description"))
+  .argument("<id>", t("proxies.remove.id"))
   .action(async (id: string) => {
     await runCli(async () => {
       await cliCall(() => client().deleteProxy(id));
-      console.log(`  ${green("✓")} Removed ${id}`);
+      console.log(`  ${green("✓")} ${t("proxies.remove.done", { id })}`);
     });
   });
 
 proxies
   .command("switch")
-  .description("Route traffic through a proxy")
-  .argument("<id>", "proxy id, i.e. host:port")
+  .description(t("proxies.switch.description"))
+  .argument("<id>", t("proxies.switch.id"))
   .action(async (id: string) => {
     await runCli(async () => {
       const proxy = await cliCall(() => client().setActiveProxy(id));
-      console.log(`  ${green("✓")} Active proxy: ${proxy.id}`);
+      console.log(`  ${green("✓")} ${t("proxies.switch.done", { id: proxy.id })}`);
     });
   });
 
 program
   .command("rotate")
-  .description("Move to the next proxy in the pool")
+  .description(t("rotate.description"))
   .action(async () => {
     await runCli(async () => {
       const proxy = await cliCall(() => client().rotateActiveProxy());
-      console.log(`  ${green("✓")} Active proxy: ${proxy.id}`);
+      console.log(`  ${green("✓")} ${t("rotate.done", { id: proxy.id })}`);
     });
   });
 
-const sources = program.command("sources").description("Manage scrape sources");
+const sources = program.command("sources").description(t("sources.group"));
 
 sources
   .command("list", { isDefault: true })
-  .description("List scrape sources")
+  .description(t("sources.list.description"))
   .action(async () => {
     await runCli(async () => {
       const list = await cliCall(() => client().listSources());
-      heading(`Sources (${list.length})`);
+      heading(t("sources.list.title", { count: list.length }));
       table(
-        ["ID", "URL"],
+        t.list("sources.list.columns"),
         list.map((s) => [s.id, truncate(s.url, 74)]),
       );
     });
@@ -213,52 +296,55 @@ sources
 
 sources
   .command("add")
-  .description("Add a scrape source")
-  .argument("<url>")
+  .description(t("sources.add.description"))
+  .argument("<url>", t("sources.add.url"))
   .action(async (url: string) => {
     await runCli(async () => {
       const source = await cliCall(() => client().createSource(url));
-      console.log(`  ${green("✓")} Source added as ${source.id}`);
+      console.log(`  ${green("✓")} ${t("sources.add.done", { id: source.id })}`);
     });
   });
 
 sources
   .command("remove")
-  .description("Remove a scrape source")
-  .argument("<id>", "source id, as shown by `ps sources list`")
+  .description(t("sources.remove.description"))
+  .argument("<id>", t("sources.remove.id"))
   .action(async (id: string) => {
     await runCli(async () => {
       await cliCall(() => client().deleteSource(id));
-      console.log(`  ${green("✓")} Source ${id} removed`);
+      console.log(`  ${green("✓")} ${t("sources.remove.done", { id })}`);
     });
   });
 
-const scrape = program.command("scrape").description("Trigger and inspect scrapes");
+const scrape = program.command("scrape").description(t("scrape.group"));
 
 scrape
   .command("status", { isDefault: true })
-  .description("Show scrape state and health-check progress")
+  .description(t("scrape.status.description"))
   .action(async () => {
     await runCli(async () => {
       const run = await cliCall(() => client().getCurrentScrapeRun());
 
-      heading("Scrape");
-      keyValue("State", run.state);
-      keyValue("Last run", run.started_at ? new Date(run.started_at).toLocaleString() : null);
-      keyValue("Proxies found", run.proxies_found);
-      keyValue("Healthy", run.healthy_count);
-      keyValue("Due for probe", run.pending);
+      heading(t("scrape.status.title"));
+      keyValue(t("scrape.status.state"), run.state);
       keyValue(
-        "Next probe due",
+        t("scrape.status.lastRun"),
+        run.started_at ? new Date(run.started_at).toLocaleString() : null,
+      );
+      keyValue(t("scrape.status.proxiesFound"), run.proxies_found);
+      keyValue(t("scrape.status.healthy"), run.healthy_count);
+      keyValue(t("scrape.status.dueForProbe"), run.pending);
+      keyValue(
+        t("scrape.status.nextDue"),
         run.next_due_at ? new Date(run.next_due_at).toLocaleString() : null,
       );
-      keyValue("Errors", run.errors.length);
+      keyValue(t("scrape.status.errors"), run.errors.length);
 
       if (run.health_check) {
         const { checked, total } = run.health_check;
         const percent = total > 0 ? Math.round((checked / total) * 100) : 0;
-        heading("Health check");
-        keyValue("Progress", `${checked} / ${total} (${percent}%)`);
+        heading(t("scrape.status.healthCheck"));
+        keyValue(t("scrape.status.progress", { checked, total, percent }), "");
       }
 
       for (const error of run.errors) {
@@ -269,18 +355,18 @@ scrape
 
 scrape
   .command("run")
-  .description("Trigger a scrape cycle now")
+  .description(t("scrape.run.description"))
   .action(async () => {
     await runCli(async () => {
       await cliCall(() => client().createScrapeRun());
-      console.log(`  ${green("✓")} Scrape started`);
+      console.log(`  ${green("✓")} ${t("scrape.run.done")}`);
     });
   });
 
 program
   .command("audit")
-  .description("Show the audit log (admin only)")
-  .option("-n, --limit <count>", "maximum rows", "25")
+  .description(t("audit.description"))
+  .option("-n, --limit <count>", t("audit.limit"), "25")
   .action(async (options: { limit: string }) => {
     await runCli(async () => {
       const limit = Number(options.limit);
@@ -288,15 +374,15 @@ program
         client().listAuditEvents({ limit: Number.isFinite(limit) ? limit : 25 }),
       );
 
-      heading(`Audit (${entries.length})`);
+      heading(t("audit.title", { count: entries.length }));
       table(
-        ["WHEN", "ACTOR", "ACTION", "TARGET", "OUTCOME"],
+        t.list("audit.columns"),
         entries.map((e) => [
           new Date(e.ts).toLocaleString(),
           e.actor_type,
           truncate(e.action, 22),
           truncate(e.target ?? "—", 28),
-          e.outcome === "allowed" ? green("ok") : red("denied"),
+          e.outcome === "allowed" ? green(t("audit.allowed")) : red(t("audit.denied")),
         ]),
       );
     });

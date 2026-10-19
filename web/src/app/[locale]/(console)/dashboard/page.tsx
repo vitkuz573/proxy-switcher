@@ -1,19 +1,30 @@
 import { Activity, Globe, RefreshCw, Server } from "lucide-react";
-import { HealthProgress, IDLE_SCRAPE_RUN } from "@/components/health-progress";
+import type { Metadata } from "next";
+import { getTranslations, setRequestLocale } from "next-intl/server";
+import { HealthProgress } from "@/components/health-progress";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { getRouting, getScrapeRun, getStats, getSummary } from "@/lib/api";
 
-export const metadata = { title: "Dashboard" };
+type Props = { params: Promise<{ locale: string }> };
 
-export default function DashboardPage() {
+export async function generateMetadata({ params }: Props): Promise<Metadata> {
+  const { locale } = await params;
+  const t = await getTranslations({ locale, namespace: "Dashboard" });
+
+  return { title: t("title") };
+}
+
+export default async function DashboardPage({ params }: Props) {
+  const { locale } = await params;
+  setRequestLocale(locale);
+  const t = await getTranslations("Dashboard");
+
   return (
     <>
       <header>
-        <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
-        <p className="text-sm text-muted-foreground">
-          System-wide IP switching through public proxies.
-        </p>
+        <h1 className="text-2xl font-semibold tracking-tight">{t("title")}</h1>
+        <p className="text-sm text-muted-foreground">{t("subtitle")}</p>
       </header>
 
       {/* Each section reads the session, so each streams in behind the layout's
@@ -26,46 +37,48 @@ export default function DashboardPage() {
 }
 
 async function StatsRow() {
+  const t = await getTranslations("Dashboard");
   const [summary, stats] = await Promise.all([getSummary(), getStats()]);
 
   return (
     <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
       <Stat
         icon={<Server className="size-4" />}
-        label="Pool size"
+        label={t("poolSize")}
         value={summary?.pool_size ?? 0}
-        hint="proxies in the engine pool"
+        hint={t("poolSizeHint")}
       />
       <Stat
         icon={<Activity className="size-4" />}
-        label="Healthy"
+        label={t("healthy")}
         value={stats?.healthy_count ?? 0}
-        hint="confirmed reachable"
+        hint={t("healthyHint")}
       />
       <Stat
         icon={<RefreshCw className="size-4" />}
-        label="TCP connections"
+        label={t("tcpConnections")}
         value={stats?.tcp_connections ?? 0}
-        hint="active forwards"
+        hint={t("tcpConnectionsHint")}
       />
       <Stat
         icon={<Globe className="size-4" />}
-        label="DNS cache"
+        label={t("dnsCache")}
         value={stats?.dns_cache_size ?? 0}
-        hint="resolved names"
+        hint={t("dnsCacheHint")}
       />
     </section>
   );
 }
 
 async function RoutingPanel() {
+  const t = await getTranslations("Dashboard");
   const routing = await getRouting();
 
   return (
     <Card>
       <CardContent className="grid gap-2">
         <div className="flex items-center justify-between text-sm">
-          <span className="text-muted-foreground">Proxied traffic</span>
+          <span className="text-muted-foreground">{t("routing")}</span>
           <Badge variant={routing?.enabled ? "default" : "outline"}>
             {routing?.enabled ? routing.policy.mode : "none"}
           </Badge>
@@ -73,7 +86,7 @@ async function RoutingPanel() {
         <p className="text-xs text-muted-foreground">
           {routing?.enabled
             ? `${routing.policy.cidrs.length + routing.policy.domains.length} rules apply`
-            : "No traffic goes through a proxy. A proxy is a tool for specific destinations, not a default route."}
+            : t("routingNone")}
         </p>
       </CardContent>
     </Card>
@@ -81,7 +94,9 @@ async function RoutingPanel() {
 }
 
 async function ScraperPanel() {
-  return <HealthProgress initial={(await getScrapeRun()) ?? IDLE_SCRAPE_RUN} />;
+  const scrape = await getScrapeRun();
+
+  return <HealthProgress initial={scrape} />;
 }
 
 function Stat({

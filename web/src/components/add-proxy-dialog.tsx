@@ -1,6 +1,7 @@
 "use client";
 
 import type { Anonymity, ProxyProtocol } from "@proxy-switcher/sdk";
+import { useTranslations } from "next-intl";
 import { type FormEvent, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -35,6 +36,8 @@ export function AddProxyDialog({
   onOpenChange: (open: boolean) => void;
   onCreated: () => void;
 }) {
+  const t = useTranslations("Proxies.addDialog");
+  const tCommon = useTranslations("Common");
   const [host, setHost] = useState("");
   const [port, setPort] = useState("");
   const [protocol, setProtocol] = useState<ProxyProtocol>("http");
@@ -47,7 +50,7 @@ export function AddProxyDialog({
     const parsedPort = Number(port);
 
     if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
-      toast.error("Port must be between 1 and 65535");
+      toast.error(t("portRange"));
       return;
     }
 
@@ -59,13 +62,13 @@ export function AddProxyDialog({
         protocol,
         ...(country.trim() ? { country: country.trim() } : {}),
       });
-      toast.success(`Added ${proxy.id}`);
+      toast.success(proxy.id);
       setHost("");
       setPort("");
       setCountry("");
       onCreated();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not add the proxy");
+      toast.error(err instanceof Error ? err.message : t("failed"));
     } finally {
       setPending(false);
     }
@@ -75,15 +78,13 @@ export function AddProxyDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Add a proxy</DialogTitle>
-          <DialogDescription>
-            The proxy joins the pool immediately and is health checked on the next cycle.
-          </DialogDescription>
+          <DialogTitle>{t("title")}</DialogTitle>
+          <DialogDescription>{t("description")}</DialogDescription>
         </DialogHeader>
 
         <form onSubmit={onSubmit} className="grid gap-4">
           <div className="grid gap-2">
-            <Label htmlFor="host">Host or IP</Label>
+            <Label htmlFor="host">{t("host")}</Label>
             <Input
               id="host"
               required
@@ -95,7 +96,7 @@ export function AddProxyDialog({
 
           <div className="grid grid-cols-2 gap-3">
             <div className="grid gap-2">
-              <Label htmlFor="port">Port</Label>
+              <Label htmlFor="port">{t("port")}</Label>
               <Input
                 id="port"
                 required
@@ -106,7 +107,7 @@ export function AddProxyDialog({
               />
             </div>
             <div className="grid gap-2">
-              <Label>Protocol</Label>
+              <Label>{t("protocol")}</Label>
               <Select value={protocol} onValueChange={(v) => setProtocol(v as ProxyProtocol)}>
                 <SelectTrigger>
                   <SelectValue />
@@ -124,7 +125,7 @@ export function AddProxyDialog({
 
           <div className="grid grid-cols-2 gap-3">
             <div className="grid gap-2">
-              <Label>Anonymity</Label>
+              <Label>{t("anonymity")}</Label>
               <Select value={anonymity} onValueChange={(v) => setAnonymity(v as Anonymity)}>
                 <SelectTrigger>
                   <SelectValue />
@@ -139,7 +140,7 @@ export function AddProxyDialog({
               </Select>
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="country">Country</Label>
+              <Label htmlFor="country">{t("country")}</Label>
               <Input
                 id="country"
                 placeholder="optional"
@@ -151,10 +152,10 @@ export function AddProxyDialog({
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-              Cancel
+              {tCommon("actions.cancel")}
             </Button>
             <Button type="submit" disabled={pending}>
-              {pending ? "Adding…" : "Add proxy"}
+              {pending ? `${t("submit")}…` : t("submit")}
             </Button>
           </DialogFooter>
         </form>

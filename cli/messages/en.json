@@ -1,0 +1,140 @@
+{
+  "common": {
+    "nothingToShow": "(nothing to show)",
+    "none": "—",
+    "notSignedIn": "Not signed in.",
+    "runLogin": "Run 'ps auth login' first.",
+    "description": "Control the proxy-switcher engine",
+    "apiUrl": "API base URL",
+    "locale": "language for the output: en or ru"
+  },
+  "auth": {
+    "login": {
+      "description": "Exchange email and password for an API token",
+      "email": "account email",
+      "password": "account password",
+      "emailPrompt": "Email: ",
+      "passwordPrompt": "Password: ",
+      "signedIn": "Signed in as {email} ({role})",
+      "tokenStored": "token {prefix} stored in {path}"
+    },
+    "status": {
+      "description": "Show which token is stored",
+      "apiUrl": "API URL",
+      "token": "Token",
+      "stored": "stored",
+      "missing": "missing",
+      "config": "Config"
+    },
+    "logout": {
+      "description": "Forget the stored token",
+      "done": "Token removed"
+    },
+    "group": "Credential management"
+  },
+  "status": {
+    "description": "Active proxy and pool size",
+    "engine": "Engine",
+    "poolSize": "Pool size",
+    "healthy": "Healthy",
+    "tcpConnections": "TCP connections",
+    "udpFlows": "UDP flows",
+    "dnsCache": "DNS cache entries",
+    "activeProxy": "Active proxy",
+    "noneSelected": "none selected",
+    "endpoint": "Endpoint",
+    "protocol": "Protocol",
+    "anonymity": "Anonymity",
+    "latency": "Latency",
+    "score": "Score"
+  },
+  "proxies": {
+    "list": {
+      "description": "List proxies",
+      "search": "filter by host, port, protocol or country",
+      "limit": "maximum rows",
+      "sort": "score | latency | host",
+      "title": "Proxies ({shown} of {total})",
+      "columns": ["", "ENDPOINT", "PROTO", "LATENCY", "SCORE"]
+    },
+    "add": {
+      "description": "Add a proxy manually",
+      "host": "hostname or IP",
+      "port": "port number",
+      "protocol": "http | https | socks4 | socks5",
+      "country": "country label",
+      "done": "Added {id} to the pool",
+      "badPort": "Port must be an integer between 1 and 65535."
+    },
+    "remove": {
+      "description": "Remove a proxy from the pool",
+      "id": "proxy id, i.e. host:port",
+      "done": "Removed {id}"
+    },
+    "switch": {
+      "description": "Route traffic through a proxy",
+      "id": "proxy id, i.e. host:port",
+      "done": "Active proxy: {id}"
+    },
+    "group": "Manage the proxy pool"
+  },
+  "rotate": {
+    "description": "Move to the next proxy in the pool",
+    "done": "Active proxy: {id}"
+  },
+  "sources": {
+    "list": {
+      "description": "List scrape sources",
+      "title": "Sources ({count})",
+      "columns": ["ID", "URL"]
+    },
+    "add": {
+      "description": "Add a scrape source",
+      "url": "url",
+      "done": "Source added as {id}"
+    },
+    "remove": {
+      "description": "Remove a scrape source",
+      "id": "source id, as shown by 'ps sources list'",
+      "done": "Source {id} removed"
+    },
+    "group": "Manage scrape sources"
+  },
+  "scrape": {
+    "status": {
+      "description": "Show scrape state and health-check progress",
+      "title": "Scrape",
+      "state": "State",
+      "lastRun": "Last run",
+      "proxiesFound": "Proxies found",
+      "healthy": "Healthy",
+      "dueForProbe": "Due for probe",
+      "nextDue": "Next probe due",
+      "errors": "Errors",
+      "healthCheck": "Health check",
+      "progress": "{checked} / {total} ({percent}%)"
+    },
+    "run": {
+      "description": "Trigger a scrape cycle now",
+      "done": "Scrape started"
+    },
+    "group": "Trigger and inspect scrapes"
+  },
+  "audit": {
+    "description": "Show the audit log (admin only)",
+    "limit": "maximum rows",
+    "title": "Audit ({count})",
+    "columns": ["WHEN", "ACTOR", "ACTION", "TARGET", "OUTCOME"],
+    "allowed": "ok",
+    "denied": "denied"
+  },
+  "help": {
+    "usage": "Usage:",
+    "options": "Options:",
+    "commands": "Commands:",
+    "arguments": "Arguments:",
+    "description": "Description:",
+    "version": "output the version number",
+    "option": "display help for command"
+  }
+}

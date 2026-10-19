@@ -1,7 +1,8 @@
 "use client";
 
-import type { Problem, ScrapeRun } from "@proxy-switcher/sdk";
+import type { ScrapeRun } from "@proxy-switcher/sdk";
 import { RefreshCw } from "lucide-react";
+import { useFormatter, useTranslations } from "next-intl";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
@@ -28,8 +29,10 @@ const IDLE: ScrapeRun = {
  * soon as it settles, so an idle console does not hold a request open every few
  * seconds.
  */
-export function HealthProgress({ initial }: { initial: ScrapeRun }) {
-  const [run, setRun] = useState(initial);
+export function HealthProgress({ initial }: { initial: ScrapeRun | null }) {
+  const t = useTranslations("Scraper");
+  const format = useFormatter();
+  const [run, setRun] = useState(initial ?? IDLE);
   const [busy, setBusy] = useState(false);
 
   const active = run.state !== "idle" || run.health_check !== null;
@@ -71,13 +74,13 @@ export function HealthProgress({ initial }: { initial: ScrapeRun }) {
       });
       if (!response.ok) {
         // Every failure is an RFC 9457 problem document.
-        const problem = (await response.json().catch(() => null)) as Problem | null;
+        const problem = (await response.json().catch(() => null)) as { detail?: string } | null;
         throw new Error(problem?.detail ?? `Failed with ${response.status}`);
       }
-      toast.success("Scrape started");
+      toast.success(t("started"));
       setRun((prev) => ({ ...prev, state: "running" }));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not trigger a scrape");
+      toast.error(err instanceof Error ? err.message : t("triggerFailed"));
     } finally {
       setBusy(false);
     }
@@ -91,59 +94,65 @@ export function HealthProgress({ initial }: { initial: ScrapeRun }) {
     <Card>
       <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0">
         <div>
-          <CardTitle className="text-base">Scraper</CardTitle>
+          <CardTitle className="text-base">{t("cardTitle")}</CardTitle>
           <p className="text-sm text-muted-foreground">
-            {run.started_at ? `Last run ${new Date(run.started_at).toLocaleString()}` : "Never run"}
+            {run.started_at
+              ? t("lastRun", { time: format.dateTime(new Date(run.started_at)) })
+              : t("neverRun")}
           </p>
         </div>
         <div className="flex items-center gap-2">
           {active ? (
-            <Badge variant="secondary">{run.state}</Badge>
+            <Badge variant="secondary">{t(`state.${run.state}`)}</Badge>
           ) : (
-            <Badge variant="outline">idle</Badge>
+            <Badge variant="outline">{t("state.idle")}</Badge>
           )}
           <Button size="sm" onClick={trigger} disabled={busy || active}>
             <RefreshCw className={busy ? "animate-spin" : undefined} />
-            Scrape now
+            {t("scrapeNow")}
           </Button>
         </div>
       </CardHeader>
 
       <CardContent className="grid gap-4">
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          <Metric label="Proxies found" value={run.proxies_found} />
-          <Metric label="Healthy" value={run.healthy_count} />
-          <Metric label="Due" value={run.pending} />
+          <Metric label={t("metrics.found")} value={run.proxies_found} />
+          <Metric label={t("metrics.healthy")} value={run.healthy_count} />
+          <Metric label={t("metrics.due")} value={run.pending} />
           <Metric
-            label="Errors"
+            label={t("metrics.errors")}
             value={run.errors.length}
             className={run.errors.length > 0 ? "text-destructive" : undefined}
           />
         </div>
 
-        {run.next_due_at ? (
-          <p className="text-xs text-muted-foreground">
-            Next probe due {new Date(run.next_due_at).toLocaleString()}
-          </p>
-        ) : null}
-
         {progress ? (
           <div className="grid gap-2">
             <div className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground">Health check</span>
+              <span className="text-muted-foreground">{t("healthCheck")}</span>
               <span className="tabular-nums">
-                {progress.checked.toLocaleString()} / {progress.total.toLocaleString()} ({percent}%)
+                {t("progress", {
+                  checked: progress.checked.toLocaleString(),
+                  total: progress.total.toLocaleString(),
+                  percent,
+                })}
               </span>
             </div>
             <Progress value={percent} />
           </div>
         ) : null}
 
+        {run.next_due_at ? (
+          <p className="text-xs text-muted-foreground">
+            {t("nextDue", { time: format.dateTime(new Date(run.next_due_at)) })}
+          </p>
+        ) : null}
+
         {run.errors.length > 0 ? (
           <>
             <Separator />
             <ul className="grid gap-1 text-sm text-destructive">
-              {run.errors.slice(0, 5).map((message) => (
+              {[...new Set(run.errors)].slice(0, 5).map((message) => (
                 <li key={message} className="truncate">
                   {message}
                 </li>
@@ -166,5 +175,3 @@ function Metric({ label, value, className }: { label: string; value: number; cla
     </div>
   );
 }
-
-export { IDLE as IDLE_SCRAPE_RUN };

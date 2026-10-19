@@ -1,18 +1,31 @@
 import { Globe } from "lucide-react";
+import type { Metadata } from "next";
+import { getTranslations, setRequestLocale } from "next-intl/server";
 import { ProxiesTable } from "@/components/proxies-table";
 import { getProxies, getSummary } from "@/lib/api";
 import { getCurrentUser } from "@/lib/auth";
 
-export const metadata = { title: "Proxies" };
+type Props = { params: Promise<{ locale: string }> };
 
-export default async function ProxiesPage() {
+export async function generateMetadata({ params }: Props): Promise<Metadata> {
+  const { locale } = await params;
+  const t = await getTranslations({ locale, namespace: "Proxies" });
+
+  return { title: t("title") };
+}
+
+export default async function ProxiesPage({ params }: Props) {
+  const { locale } = await params;
+  setRequestLocale(locale);
+  const t = await getTranslations("Proxies");
+
   const user = await getCurrentUser();
   const [proxies, summary] = await Promise.all([getProxies(), getSummary()]);
 
   return (
     <>
       <header>
-        <h1 className="text-2xl font-semibold tracking-tight">Proxies</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">{t("title")}</h1>
         <p className="text-sm text-muted-foreground">
           {proxies.length.toLocaleString()} in the pool,{" "}
           <span className="inline-flex items-center gap-1">

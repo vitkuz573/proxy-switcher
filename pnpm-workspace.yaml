@@ -11,3 +11,7 @@ allowBuilds:
   better-sqlite3: true
   esbuild: true
   unrs-resolver: true
+  # Next.js watches the filesystem through these two; both ship a prebuilt
+  # binary that has to be unpacked by a lifecycle script.
+  "@parcel/watcher": true
+  "@swc/core": true

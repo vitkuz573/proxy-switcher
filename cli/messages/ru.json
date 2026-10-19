@@ -1,0 +1,140 @@
+{
+  "common": {
+    "nothingToShow": "(нечего показать)",
+    "none": "—",
+    "notSignedIn": "Вы не вошли.",
+    "runLogin": "Сначала выполните 'ps auth login'.",
+    "description": "Управление движком proxy-switcher",
+    "apiUrl": "Адрес API",
+    "locale": "язык вывода: en или ru"
+  },
+  "auth": {
+    "login": {
+      "description": "Обменять почту и пароль на токен API",
+      "email": "почта аккаунта",
+      "password": "пароль аккаунта",
+      "emailPrompt": "Почта: ",
+      "passwordPrompt": "Пароль: ",
+      "signedIn": "Вы вошли как {email} ({role})",
+      "tokenStored": "токен {prefix} сохранён в {path}"
+    },
+    "status": {
+      "description": "Показать, какой токен сохранён",
+      "apiUrl": "Адрес API",
+      "token": "Токен",
+      "stored": "есть",
+      "missing": "нет",
+      "config": "Файл настроек"
+    },
+    "logout": {
+      "description": "Забыть сохранённый токен",
+      "done": "Токен удалён"
+    },
+    "group": "Управление учётными данными"
+  },
+  "status": {
+    "description": "Активный прокси и размер пула",
+    "engine": "Движок",
+    "poolSize": "Размер пула",
+    "healthy": "Рабочих",
+    "tcpConnections": "TCP-соединения",
+    "udpFlows": "UDP-потоки",
+    "dnsCache": "Записей в кэше DNS",
+    "activeProxy": "Активный прокси",
+    "noneSelected": "не выбран",
+    "endpoint": "Адрес",
+    "protocol": "Протокол",
+    "anonymity": "Анонимность",
+    "latency": "Задержка",
+    "score": "Оценка"
+  },
+  "proxies": {
+    "list": {
+      "description": "Показать прокси",
+      "search": "фильтр по хосту, порту, протоколу или стране",
+      "limit": "сколько строк показать",
+      "sort": "score | latency | host",
+      "title": "Прокси ({shown} из {total})",
+      "columns": ["", "АДРЕС", "ПРОТОКОЛ", "ЗАДЕРЖКА", "ОЦЕНКА"]
+    },
+    "add": {
+      "description": "Добавить прокси вручную",
+      "host": "имя хоста или IP",
+      "port": "номер порта",
+      "protocol": "http | https | socks4 | socks5",
+      "country": "код страны",
+      "done": "Прокси {id} добавлен в пул",
+      "badPort": "Порт должен быть целым числом от 1 до 65535."
+    },
+    "remove": {
+      "description": "Убрать прокси из пула",
+      "id": "идентификатор прокси, то есть host:port",
+      "done": "Прокси {id} убран"
+    },
+    "switch": {
+      "description": "Направить трафик через прокси",
+      "id": "идентификатор прокси, то есть host:port",
+      "done": "Активный прокси: {id}"
+    },
+    "group": "Управление пулом прокси"
+  },
+  "rotate": {
+    "description": "Переключиться на следующий прокси в пуле",
+    "done": "Активный прокси: {id}"
+  },
+  "sources": {
+    "list": {
+      "description": "Показать источники скрейпа",
+      "title": "Источники ({count})",
+      "columns": ["ID", "АДРЕС"]
+    },
+    "add": {
+      "description": "Добавить источник скрейпа",
+      "url": "адрес",
+      "done": "Источник добавлен как {id}"
+    },
+    "remove": {
+      "description": "Убрать источник скрейпа",
+      "id": "идентификатор источника, как показывает 'ps sources list'",
+      "done": "Источник {id} убран"
+    },
+    "group": "Управление источниками скрейпа"
+  },
+  "scrape": {
+    "status": {
+      "description": "Показать состояние скрейпа и ход проверки",
+      "title": "Скрейп",
+      "state": "Состояние",
+      "lastRun": "Последний запуск",
+      "proxiesFound": "Найдено прокси",
+      "healthy": "Рабочих",
+      "dueForProbe": "Ждут проверки",
+      "nextDue": "Следующая проверка",
+      "errors": "Ошибок",
+      "healthCheck": "Проверка",
+      "progress": "{checked} / {total} ({percent}%)"
+    },
+    "run": {
+      "description": "Запустить цикл скрейпа сейчас",
+      "done": "Скрейп запущен"
+    },
+    "group": "Запуск скрейпа и наблюдение за ним"
+  },
+  "audit": {
+    "description": "Показать журнал действий (только для администратора)",
+    "limit": "сколько строк показать",
+    "title": "Журнал ({count})",
+    "columns": ["КОГДА", "КТО", "ДЕЙСТВИЕ", "ОБЪЕКТ", "ИТОГ"],
+    "allowed": "ок",
+    "denied": "отказ"
+  },
+  "help": {
+    "usage": "Использование:",
+    "options": "Опции:",
+    "commands": "Команды:",
+    "arguments": "Аргументы:",
+    "description": "Описание:",
+    "version": "показать номер версии",
+    "option": "показать справку по команде"
+  }
+}

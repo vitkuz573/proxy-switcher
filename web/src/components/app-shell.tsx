@@ -1,5 +1,7 @@
+import { getTranslations } from "next-intl/server";
 import { Suspense } from "react";
 import { AppNav } from "@/components/app-nav";
+import { LocaleSwitcher } from "@/components/locale-switcher";
 import { SignOutButton } from "@/components/sign-out-button";
 import {
   Sidebar,
@@ -18,14 +20,16 @@ import { getCurrentUser } from "@/lib/auth";
  * the session, so it streams behind a Suspense boundary — that is what lets
  * the rest of the page prerender instead of blocking on every navigation.
  */
-export function AppShell() {
+export async function AppShell() {
+  const t = await getTranslations("Metadata");
+
   return (
     <Sidebar collapsible="icon">
       <SidebarHeader>
         <div className="flex items-center gap-2 px-2 py-1.5">
           <span className="size-5 rounded-md bg-primary" />
           <span className="truncate font-semibold group-data-[collapsible=icon]:hidden">
-            Proxy Switcher
+            {t("title")}
           </span>
         </div>
       </SidebarHeader>
@@ -35,6 +39,9 @@ export function AppShell() {
       </SidebarContent>
 
       <SidebarFooter>
+        <div className="flex items-center justify-between gap-2 px-2">
+          <LocaleSwitcher />
+        </div>
         <Suspense fallback={<FooterSkeleton />}>
           <AccountFooter />
         </Suspense>

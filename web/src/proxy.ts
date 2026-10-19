@@ -1,45 +1,61 @@
 import { type NextRequest, NextResponse } from "next/server";
+import createIntlProxy from "next-intl/middleware";
+
+import { routing } from "@/i18n/routing";
 
 const SESSION_COOKIE = "ps_session";
 
 /** Pages that require a session. */
-const PROTECTED = ["/dashboard", "/proxies", "/scraper", "/audit"];
+const PROTECTED = ["/dashboard", "/proxies", "/scraper", "/statistics", "/audit"];
+
+const intlProxy = createIntlProxy(routing);
 
 /**
- * Cheap first gate: bounce visitors without a session cookie before any
- * rendering happens, so an unauthenticated request gets a real redirect instead
- * of a static shell that redirects on the client.
+ * The locale, then the session.
  *
- * This is a routing shortcut, not a security boundary — the cookie could be
- * forged or stale. `lib/auth.ts` verifies the session against the API and is
- * the actual check.
+ * The locale comes first because it rewrites the path: without the rewrite
+ * the session check would see `/ru/dashboard` and not recognise it as a
+ * protected page.
+ *
+ * The session check is a routing shortcut, not a security boundary — the
+ * cookie could be forged or stale. `lib/auth.ts` verifies the session against
+ * the API and is the actual check.
  */
 export function proxy(request: NextRequest): NextResponse {
+  const response = intlProxy(request);
   const { pathname } = request.nextUrl;
   const hasSession = request.cookies.has(SESSION_COOKIE);
 
+  // The locale prefix is part of the address, so it is stripped before the
+  // path is matched against the protected pages.
+  const locale = routing.locales.find(
+    (candidate) => pathname === `/${candidate}` || pathname.startsWith(`/${candidate}/`),
+  );
+  const withoutLocale = locale ? pathname.slice(locale.length + 1) || "/" : pathname;
+
   const isProtected = PROTECTED.some(
-    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
+    (prefix) => withoutLocale === prefix || withoutLocale.startsWith(`${prefix}/`),
   );
 
   if (isProtected && !hasSession) {
     const url = request.nextUrl.clone();
-    url.pathname = "/login";
+    url.pathname = `/${locale ?? routing.defaultLocale}/login`;
     url.search = `?next=${encodeURIComponent(pathname)}`;
     return NextResponse.redirect(url);
   }
 
   // Signed-in visitors have no business on the login form.
-  if (pathname === "/login" && hasSession) {
+  if (withoutLocale === "/login" && hasSession) {
     const url = request.nextUrl.clone();
-    url.pathname = "/dashboard";
+    url.pathname = `/${locale ?? routing.defaultLocale}/dashboard`;
     url.search = "";
     return NextResponse.redirect(url);
   }
 
-  return NextResponse.next();
+  return response;
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)"],
+  // Everything except the API, the internals, and files with an extension.
+  matcher: "/((?!api|_next|_vercel|.*\\..*).*)",
 };

@@ -1,3 +1,4 @@
+import { setRequestLocale } from "next-intl/server";
 import { Suspense } from "react";
 import { AppShell } from "@/components/app-shell";
 import { Separator } from "@/components/ui/separator";
@@ -9,7 +10,15 @@ import { Skeleton } from "@/components/ui/skeleton";
  * happen inside Suspense boundaries (see `lib/auth.ts`), which is what keeps
  * this layout static instead of blocking on every navigation.
  */
-export default function ConsoleLayout({ children }: LayoutProps<"/">) {
+type Props = {
+  children: React.ReactNode;
+  params: Promise<{ locale: string }>;
+};
+
+export default async function ConsoleLayout({ children, params }: Props) {
+  const { locale } = await params;
+  setRequestLocale(locale);
+
   return (
     <SidebarProvider>
       <AppShell />
