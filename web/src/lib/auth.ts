@@ -1,12 +1,12 @@
-import 'server-only';
-import { cookies } from 'next/headers';
-import { redirect } from 'next/navigation';
-import { API_INTERNAL_URL, SESSION_COOKIE } from './env';
+import "server-only";
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
+import { API_INTERNAL_URL, SESSION_COOKIE } from "./env";
 
 export interface SessionUser {
   id: string;
   email: string;
-  role: 'admin' | 'operator' | 'viewer';
+  role: "admin" | "operator" | "viewer";
 }
 
 /**
@@ -21,17 +21,17 @@ export async function getCurrentUser(): Promise<SessionUser> {
   const session = (await cookies()).get(SESSION_COOKIE)?.value;
 
   if (!session) {
-    redirect('/login');
+    redirect("/login");
   }
 
-  const response = await fetch(`${API_INTERNAL_URL}/api/v1/auth/me`, {
+  const response = await fetch(`${API_INTERNAL_URL}/api/v1/sessions/current`, {
     headers: { cookie: `${SESSION_COOKIE}=${session}` },
-    cache: 'no-store',
+    cache: "no-store",
   });
 
   if (response.status === 401 || response.status === 403) {
     // The cookie exists but is no longer valid; drop it on the way out.
-    redirect('/login');
+    redirect("/login");
   }
 
   if (!response.ok) {

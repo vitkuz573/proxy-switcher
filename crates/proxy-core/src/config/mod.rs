@@ -15,7 +15,6 @@ pub struct DaemonConfig {
     pub api_host: String,
     pub api_port: u16,
     pub data_dir: PathBuf,
-    pub ui_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +38,20 @@ pub struct HealthConfig {
     pub timeout_secs: u64,
     pub check_interval_secs: u64,
     pub target_url: String,
+    /// Consecutive failed probes a proxy survives before it leaves the pool.
+    #[serde(default = "default_failure_threshold")]
+    pub max_consecutive_failures: u32,
+    /// How long a proxy that has never worked is kept while unverified.
+    #[serde(default = "default_unverified_ttl")]
+    pub unverified_ttl_secs: u64,
+}
+
+fn default_failure_threshold() -> u32 {
+    3
+}
+
+fn default_unverified_ttl() -> u64 {
+    3600
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,7 +69,6 @@ impl Default for Config {
                 api_host: "127.0.0.1".into(),
                 api_port: 8080,
                 data_dir: PathBuf::from("/var/lib/proxy-switcher"),
-                ui_dir: PathBuf::from("/usr/share/proxy-switcher/ui"),
             },
             tun: TunConfig {
                 name: "ps-tun0".into(),
@@ -74,10 +86,15 @@ impl Default for Config {
                 ],
             },
             health: HealthConfig {
-                concurrency: 20,
-                timeout_secs: 10,
-                check_interval_secs: 60,
+                concurrency: 100,
+                timeout_secs: 5,
+                // Re-probing every minute churned the pool for no benefit; a
+                // public proxy that works now usually still works in ten
+                // minutes, and the streak counter handles genuine decay.
+                check_interval_secs: 600,
                 target_url: "http://httpbin.org/ip".into(),
+                max_consecutive_failures: default_failure_threshold(),
+                unverified_ttl_secs: default_unverified_ttl(),
             },
             pool: PoolConfig {
                 max_proxies: 1000,

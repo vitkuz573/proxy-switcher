@@ -1,4 +1,4 @@
-import { NextResponse, type NextRequest } from "next/server";
+import { type NextRequest, NextResponse } from "next/server";
 import { API_INTERNAL_URL } from "@/lib/env";
 
 /**
@@ -15,16 +15,16 @@ import { API_INTERNAL_URL } from "@/lib/env";
  */
 
 const HOP_BY_HOP = new Set([
-  'connection',
-  'keep-alive',
-  'proxy-authenticate',
-  'proxy-authorization',
-  'te',
-  'trailer',
-  'transfer-encoding',
-  'upgrade',
-  'host',
-  'content-length',
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "host",
+  "content-length",
 ]);
 
 function forwardHeaders(request: NextRequest): HeadersInit {
@@ -46,7 +46,7 @@ function responseHeaders(upstream: Headers): Headers {
     }
   });
   // The proxy is same-origin, so caching API responses would be wrong.
-  headers.set('cache-control', 'no-store');
+  headers.set("cache-control", "no-store");
   return headers;
 }
 
@@ -56,10 +56,10 @@ async function proxy(
   method: string,
 ): Promise<Response> {
   const { path } = await context.params;
-  const suffix = (path ?? []).map(encodeURIComponent).join('/');
+  const suffix = (path ?? []).map(encodeURIComponent).join("/");
   const target = `${API_INTERNAL_URL}/api/${suffix}${request.nextUrl.search}`;
 
-  const hasBody = method !== 'GET' && method !== 'HEAD';
+  const hasBody = method !== "GET" && method !== "HEAD";
   const body = hasBody ? await request.arrayBuffer() : undefined;
 
   try {
@@ -67,14 +67,12 @@ async function proxy(
       method,
       headers: forwardHeaders(request),
       ...(body ? { body } : {}),
-      cache: 'no-store',
-      redirect: 'manual',
+      cache: "no-store",
+      redirect: "manual",
     });
 
     return new NextResponse(
-      upstream.status === 204 || upstream.status === 304
-        ? null
-        : await upstream.arrayBuffer(),
+      upstream.status === 204 || upstream.status === 304 ? null : await upstream.arrayBuffer(),
       {
         status: upstream.status,
         headers: responseHeaders(upstream.headers),
@@ -84,31 +82,37 @@ async function proxy(
     // Never surface the API's address or a stack trace to the browser.
     console.error(`[proxy] ${method} ${target} failed:`, err);
     return NextResponse.json(
-      { error: 'api_unreachable', message: 'The proxy API is not reachable' },
+      { error: "api_unreachable", message: "The proxy API is not reachable" },
       { status: 502 },
     );
   }
 }
 
 export async function GET(request: NextRequest, context: { params: Promise<{ path?: string[] }> }) {
-  return proxy(request, context, 'GET');
+  return proxy(request, context, "GET");
 }
 
-export async function POST(request: NextRequest, context: { params: Promise<{ path?: string[] }> }) {
-  return proxy(request, context, 'POST');
+export async function POST(
+  request: NextRequest,
+  context: { params: Promise<{ path?: string[] }> },
+) {
+  return proxy(request, context, "POST");
 }
 
-export async function PATCH(request: NextRequest, context: { params: Promise<{ path?: string[] }> }) {
-  return proxy(request, context, 'PATCH');
+export async function PATCH(
+  request: NextRequest,
+  context: { params: Promise<{ path?: string[] }> },
+) {
+  return proxy(request, context, "PATCH");
 }
 
 export async function PUT(request: NextRequest, context: { params: Promise<{ path?: string[] }> }) {
-  return proxy(request, context, 'PUT');
+  return proxy(request, context, "PUT");
 }
 
 export async function DELETE(
   request: NextRequest,
   context: { params: Promise<{ path?: string[] }> },
 ) {
-  return proxy(request, context, 'DELETE');
+  return proxy(request, context, "DELETE");
 }

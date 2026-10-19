@@ -1,4 +1,6 @@
 import { Suspense } from "react";
+import { AppNav } from "@/components/app-nav";
+import { SignOutButton } from "@/components/sign-out-button";
 import {
   Sidebar,
   SidebarContent,
@@ -7,8 +9,6 @@ import {
   SidebarRail,
 } from "@/components/ui/sidebar";
 import { Skeleton } from "@/components/ui/skeleton";
-import { AppNav } from "@/components/app-nav";
-import { SignOutButton } from "@/components/sign-out-button";
 import { getCurrentUser } from "@/lib/auth";
 
 /**

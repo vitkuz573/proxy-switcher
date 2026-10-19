@@ -2,8 +2,8 @@ pub mod ip;
 pub mod tcp;
 
 use ip::IpHeader;
-use tcp::TcpHeader;
 use std::net::Ipv4Addr;
+use tcp::TcpHeader;
 
 #[derive(Debug)]
 pub struct ParsedPacket {
@@ -36,11 +36,15 @@ impl ParsedPacket {
     }
 
     pub fn is_tcp_syn(&self) -> bool {
-        self.tcp.as_ref().is_some_and(|t| t.flags.syn && !t.flags.ack)
+        self.tcp
+            .as_ref()
+            .is_some_and(|t| t.flags.syn && !t.flags.ack)
     }
 
     pub fn is_tcp_fin(&self) -> bool {
-        self.tcp.as_ref().is_some_and(|t| t.flags.fin || t.flags.rst)
+        self.tcp
+            .as_ref()
+            .is_some_and(|t| t.flags.fin || t.flags.rst)
     }
 }
 
@@ -119,7 +123,7 @@ pub fn build_response_packet(original: &ParsedPacket, payload: &[u8]) -> Vec<u8>
     pkt.push(64); // TTL
     pkt.push(6); // TCP
     pkt.extend_from_slice(&[0x00, 0x00]); // checksum = 0 (computed later)
-    // Swap src/dst
+                                          // Swap src/dst
     pkt.extend_from_slice(&original.ip.destination.octets());
     pkt.extend_from_slice(&original.ip.source.octets());
 
@@ -151,11 +155,7 @@ pub fn build_response_packet(original: &ParsedPacket, payload: &[u8]) -> Vec<u8>
     pkt[11] = (ip_csum & 0xFF) as u8;
 
     // Compute TCP checksum (with pseudo header)
-    let tcp_csum = tcp_checksum(
-        &original.ip.destination,
-        &original.ip.source,
-        &pkt[20..],
-    );
+    let tcp_csum = tcp_checksum(&original.ip.destination, &original.ip.source, &pkt[20..]);
     pkt[20 + 16] = (tcp_csum >> 8) as u8;
     pkt[20 + 17] = (tcp_csum & 0xFF) as u8;
 
@@ -266,18 +266,12 @@ mod tests {
 
     fn make_syn_packet() -> Vec<u8> {
         let mut pkt = vec![
-            0x45, 0x00, 0x00, 0x28,
-            0x00, 0x01, 0x00, 0x00,
-            0x40, 0x06, 0x00, 0x00,
-            0x0a, 0x00, 0x00, 0x02,
-            0x68, 0x01, 0xdb, 0x08,
+            0x45, 0x00, 0x00, 0x28, 0x00, 0x01, 0x00, 0x00, 0x40, 0x06, 0x00, 0x00, 0x0a, 0x00,
+            0x00, 0x02, 0x68, 0x01, 0xdb, 0x08,
         ];
         pkt.extend_from_slice(&[
-            0xc0, 0x00, 0x00, 0x50,
-            0x00, 0x00, 0x00, 0x64,
-            0x00, 0x00, 0x00, 0x00,
-            0x50, 0x02, 0x71, 0x10,
-            0x00, 0x00, 0x00, 0x00,
+            0xc0, 0x00, 0x00, 0x50, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x00, 0x50, 0x02,
+            0x71, 0x10, 0x00, 0x00, 0x00, 0x00,
         ]);
         pkt
     }

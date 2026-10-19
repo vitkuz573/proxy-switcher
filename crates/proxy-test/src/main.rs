@@ -1,5 +1,5 @@
 use proxy_core::forwarder::Forwarder;
-use proxy_core::proxy::{ProxyInfo, ProxyProtocol, Anonymity};
+use proxy_core::proxy::{Anonymity, ProxyInfo, ProxyProtocol};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::main]
@@ -16,10 +16,15 @@ async fn main() {
         latency_ms: None,
         country: None,
         last_checked: None,
+        last_success: None,
+        consecutive_failures: 0,
         score: 0.0,
     };
 
-    println!("=== Testing Forwarder through proxy {}:{} ===", proxy.host, proxy.port);
+    println!(
+        "=== Testing Forwarder through proxy {}:{} ===",
+        proxy.host, proxy.port
+    );
 
     match Forwarder::connect_to(&proxy, "httpbin.org", 80).await {
         Ok(mut conn) => {
@@ -34,7 +39,10 @@ async fn main() {
                 match conn.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => resp.push_str(&String::from_utf8_lossy(&buf[..n])),
-                    Err(e) => { eprintln!("Read error: {e}"); break; }
+                    Err(e) => {
+                        eprintln!("Read error: {e}");
+                        break;
+                    }
                 }
             }
             println!("Response through proxy:\n{resp}");
@@ -61,7 +69,10 @@ async fn main() {
                 match conn.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => resp.push_str(&String::from_utf8_lossy(&buf[..n])),
-                    Err(e) => { eprintln!("Read error: {e}"); break; }
+                    Err(e) => {
+                        eprintln!("Read error: {e}");
+                        break;
+                    }
                 }
             }
             println!("Direct response:\n{resp}");

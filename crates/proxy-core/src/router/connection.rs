@@ -31,11 +31,16 @@ pub struct ConnectionTracker {
 
 impl ConnectionTracker {
     pub fn new() -> Self {
-        Self { inner: Arc::new(RwLock::new(HashMap::new())) }
+        Self {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+        }
     }
 
     pub async fn insert(&self, key: FlowKey, conn: ForwardConnection, state: TcpState) {
-        self.inner.write().await.insert(key, Arc::new(RwLock::new(TrackedConnection { conn, state })));
+        self.inner.write().await.insert(
+            key,
+            Arc::new(RwLock::new(TrackedConnection { conn, state })),
+        );
     }
 
     pub async fn get(&self, key: &FlowKey) -> Option<Arc<RwLock<TrackedConnection>>> {

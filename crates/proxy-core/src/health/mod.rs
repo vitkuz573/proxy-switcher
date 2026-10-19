@@ -12,12 +12,61 @@ pub struct HealthChecker {
     timeout: Duration,
 }
 
+/// Outcome of a single probe.
+///
+/// `Inconclusive` exists because a timeout says nothing about the proxy: the
+/// host may simply have been busy. Counting those as failures made the healthy
+/// total swing by half on every re-check, even though the eviction policy
+/// tolerates three real failures in a row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// The proxy carried a request and returned a real HTTP response.
+    Working,
+    /// Conclusive evidence the endpoint is not a usable proxy.
+    Failed,
+    /// The probe timed out or the network gave up. The proxy's state is unknown.
+    Inconclusive,
+}
+
 #[derive(Debug)]
 pub struct HealthResult {
     pub proxy_id: String,
-    pub alive: bool,
+    pub verdict: Verdict,
     pub latency_ms: u64,
     pub error: Option<String>,
+}
+
+impl HealthResult {
+    pub fn working(proxy_id: &str, latency_ms: u64) -> Self {
+        Self {
+            proxy_id: proxy_id.to_string(),
+            verdict: Verdict::Working,
+            latency_ms,
+            error: None,
+        }
+    }
+
+    pub fn failed(proxy_id: &str, reason: impl Into<String>) -> Self {
+        Self {
+            proxy_id: proxy_id.to_string(),
+            verdict: Verdict::Failed,
+            latency_ms: 0,
+            error: Some(reason.into()),
+        }
+    }
+
+    pub fn inconclusive(proxy_id: &str, reason: impl Into<String>) -> Self {
+        Self {
+            proxy_id: proxy_id.to_string(),
+            verdict: Verdict::Inconclusive,
+            latency_ms: 0,
+            error: Some(reason.into()),
+        }
+    }
+
+    pub fn is_working(&self) -> bool {
+        self.verdict == Verdict::Working
+    }
 }
 
 /// Split a target URL into (host, port, path).
@@ -59,8 +108,14 @@ fn parse_target(url: &str) -> (String, u16, String) {
 }
 
 /// Probe one proxy by tunnelling to the target host through it and requiring a
-/// real HTTP response. A host that merely accepts TCP connections is not a
-/// working proxy and must not be counted as alive.
+/// real HTTP response.
+///
+/// The status code is deliberately *not* part of the verdict. Thousands of
+/// probes arrive at one shared target, and that target rate-limits. Treating a
+/// `429` or `503` as a dead proxy silently deleted working proxies whenever the
+/// target throttled us. What proves a proxy works is the ability to carry a
+/// request to the target and bring a valid HTTP response back; who then decided
+/// to answer 503 is the target's business, not the proxy's.
 async fn check_one(
     proxy: &ProxyInfo,
     host: &str,
@@ -73,22 +128,10 @@ async fn check_one(
     let mut conn =
         match tokio::time::timeout(timeout, Forwarder::connect_to(proxy, host, port)).await {
             Ok(Ok(conn)) => conn,
-            Ok(Err(e)) => {
-                return HealthResult {
-                    proxy_id: proxy.id.clone(),
-                    alive: false,
-                    latency_ms: 0,
-                    error: Some(format!("connect error: {e}")),
-                }
-            }
-            Err(_) => {
-                return HealthResult {
-                    proxy_id: proxy.id.clone(),
-                    alive: false,
-                    latency_ms: 0,
-                    error: Some("connect timeout".into()),
-                }
-            }
+            // Refused, reset, DNS failure: the endpoint is not usable.
+            Ok(Err(e)) => return HealthResult::failed(&proxy.id, format!("connect error: {e}")),
+            // Nothing came back in time — the proxy's state is unknown.
+            Err(_) => return HealthResult::inconclusive(&proxy.id, "connect timeout"),
         };
 
     let authority = if port == 80 {
@@ -104,59 +147,34 @@ async fn check_one(
 
     match tokio::time::timeout(timeout, conn.write_all(request.as_bytes())).await {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            return HealthResult {
-                proxy_id: proxy.id.clone(),
-                alive: false,
-                latency_ms: 0,
-                error: Some(format!("write error: {e}")),
-            }
-        }
-        Err(_) => {
-            return HealthResult {
-                proxy_id: proxy.id.clone(),
-                alive: false,
-                latency_ms: 0,
-                error: Some("write timeout".into()),
-            }
-        }
+        Ok(Err(e)) => return HealthResult::failed(&proxy.id, format!("write error: {e}")),
+        Err(_) => return HealthResult::inconclusive(&proxy.id, "write timeout"),
     }
 
     let mut buf = Vec::new();
     match tokio::time::timeout(timeout, conn.read_to_end(&mut buf)).await {
         Ok(Ok(_)) => {
             let response = String::from_utf8_lossy(&buf);
-            let status = response.lines().next().unwrap_or_default().trim().to_string();
-            let alive = status.starts_with("HTTP/1.")
-                && status
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|code| code.parse::<u16>().ok())
-                    .is_some_and(|code| (200..400).contains(&code));
+            let status = response
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
 
-            HealthResult {
-                proxy_id: proxy.id.clone(),
-                alive,
-                latency_ms: start.elapsed().as_millis() as u64,
-                error: if alive {
-                    None
-                } else {
-                    Some(format!("unexpected response: {status}"))
-                },
+            // A valid status line proves the tunnel carried a request and
+            // returned a response. Anything else means this endpoint is not
+            // actually a proxy — often a plain web server on the same port.
+            if status.starts_with("HTTP/1.0") || status.starts_with("HTTP/1.1") {
+                HealthResult::working(&proxy.id, start.elapsed().as_millis() as u64)
+            } else if status.is_empty() {
+                HealthResult::inconclusive(&proxy.id, "no HTTP response")
+            } else {
+                HealthResult::failed(&proxy.id, format!("not an HTTP proxy: {status}"))
             }
         }
-        Ok(Err(e)) => HealthResult {
-            proxy_id: proxy.id.clone(),
-            alive: false,
-            latency_ms: 0,
-            error: Some(format!("read error: {e}")),
-        },
-        Err(_) => HealthResult {
-            proxy_id: proxy.id.clone(),
-            alive: false,
-            latency_ms: 0,
-            error: Some("read timeout".into()),
-        },
+        Ok(Err(e)) => HealthResult::failed(&proxy.id, format!("read error: {e}")),
+        Err(_) => HealthResult::inconclusive(&proxy.id, "read timeout"),
     }
 }
 
@@ -245,7 +263,10 @@ mod tests {
 
     #[test]
     fn parses_bare_host_and_port() {
-        assert_eq!(parse_target("example.com"), ("example.com".into(), 80, "/".into()));
+        assert_eq!(
+            parse_target("example.com"),
+            ("example.com".into(), 80, "/".into())
+        );
         assert_eq!(
             parse_target("https://example.com:8443/healthz"),
             ("example.com".into(), 8443, "/healthz".into())

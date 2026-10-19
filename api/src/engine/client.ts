@@ -1,37 +1,54 @@
-import type { Config } from '../config.js';
+import type { Config } from "../config.js";
 import type {
-  Proxy,
+  Anonymity,
+  Problem,
   ProxyProtocol,
-  ScrapeStatus,
+  ProxyRecord,
+  ScrapeRun,
   Source,
   Stats,
-  Status,
-} from '../schemas/index.js';
+  Summary,
+} from "../schemas/index.js";
 
 /** Raised when the engine is unreachable, slow, or returns an error. */
 export class EngineError extends Error {
   constructor(
     message: string,
     readonly status: number | null,
+    /** The engine's own problem document, when it sent one. */
+    readonly problem?: Problem,
     override readonly cause?: unknown,
   ) {
     super(message);
-    this.name = 'EngineError';
+    this.name = "EngineError";
   }
 }
 
 interface EngineOptions {
   baseUrl: string;
   timeoutMs: number;
+  /** Injection point for contract tests. Defaults to the global fetch. */
+  fetch?: typeof globalThis.fetch;
 }
 
+/**
+ * Typed client for the internal engine.
+ *
+ * The engine mirrors the public REST shape exactly, so this is a thin
+ * pass-through rather than a translator between two dialects.
+ */
 export class EngineClient {
   constructor(private readonly opts: EngineOptions) {}
 
-  static fromConfig(config: Config): EngineClient {
+  private get fetchImpl(): typeof globalThis.fetch {
+    return this.opts.fetch ?? globalThis.fetch;
+  }
+
+  static fromConfig(config: Config, fetchImpl?: typeof globalThis.fetch): EngineClient {
     return new EngineClient({
-      baseUrl: config.ENGINE_URL.replace(/\/$/, ''),
+      baseUrl: config.ENGINE_URL.replace(/\/$/, ""),
       timeoutMs: config.ENGINE_TIMEOUT_MS,
+      ...(fetchImpl ? { fetch: fetchImpl } : {}),
     });
   }
 
@@ -49,98 +66,162 @@ export class EngineClient {
         ...(body === undefined
           ? {}
           : {
-              headers: { 'content-type': 'application/json' },
+              headers: { "content-type": "application/json" },
               body: JSON.stringify(body),
             }),
       };
-      response = await fetch(`${this.opts.baseUrl}${path}`, init);
+      response = await this.fetchImpl(`${this.opts.baseUrl}${path}`, init);
     } catch (err) {
       // Never surface a raw fetch error to clients: it leaks the internal URL.
-      throw new EngineError('engine unreachable', null, err);
+      throw new EngineError("engine unreachable", null, undefined, err);
     } finally {
       clearTimeout(timer);
     }
 
     if (!response.ok) {
-      const text = await response.text().catch(() => '');
+      const text = await response.text().catch(() => "");
+      // The engine speaks the same RFC 9457 dialect, so when it sent a problem
+      // document its explanation is already written for a human.
+      let parsed: Problem | undefined;
+      try {
+        const candidate = JSON.parse(text) as Partial<Problem>;
+        if (typeof candidate.detail === "string" && typeof candidate.status === "number") {
+          parsed = {
+            type: candidate.type ?? "about:blank",
+            title: candidate.title ?? "Engine error",
+            status: candidate.status,
+            detail: candidate.detail,
+            ...(candidate.instance ? { instance: candidate.instance } : {}),
+          };
+        }
+      } catch {
+        parsed = undefined;
+      }
+
       throw new EngineError(
         `engine returned ${response.status}`,
         response.status,
+        parsed,
         text.slice(0, 500),
       );
     }
 
-    if (response.status === 204) {
+    // 201 without a body, 202 and 204 are acknowledgements, not payloads.
+    if (response.status === 204 || response.status === 202) {
+      return undefined as T;
+    }
+
+    const text = await response.text();
+    if (text.length === 0) {
       return undefined as T;
     }
 
     try {
-      return (await response.json()) as T;
+      return JSON.parse(text) as T;
     } catch (err) {
-      throw new EngineError('engine returned malformed JSON', response.status, err);
+      throw new EngineError("engine returned malformed JSON", response.status, undefined, err);
     }
   }
 
-  getStatus(): Promise<Status> {
-    return this.request<Status>('GET', '/api/v1/status');
+  /* ── Proxies ────────────────────────────────────────────────────────── */
+
+  listProxies(
+    query: { limit?: number; offset?: number; sort?: string; search?: string } = {},
+  ): Promise<ProxyRecord[]> {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(query)) {
+      if (value !== undefined) {
+        params.set(key, String(value));
+      }
+    }
+    const suffix = params.size > 0 ? `?${params}` : "";
+    return this.request<ProxyRecord[]>("GET", `/api/v1/proxies${suffix}`);
   }
 
-  getStats(): Promise<Stats> {
-    return this.request<Stats>('GET', '/api/v1/stats');
+  getProxy(id: string): Promise<ProxyRecord> {
+    return this.request<ProxyRecord>("GET", `/api/v1/proxies/${encodeURIComponent(id)}`);
   }
 
-  getScrapeStatus(): Promise<ScrapeStatus> {
-    return this.request<ScrapeStatus>('GET', '/api/v1/scrape/status');
-  }
-
-  triggerScrape(): Promise<void> {
-    return this.request<void>('POST', '/api/v1/scrape');
-  }
-
-  listProxies(): Promise<Proxy[]> {
-    return this.request<Proxy[]>('GET', '/api/v1/proxies');
-  }
-
-  addProxy(input: {
+  createProxy(input: {
     host: string;
     port: number;
     protocol: ProxyProtocol;
-    anonymity?: Proxy['anonymity'];
     country?: string;
-  }): Promise<Proxy> {
-    return this.request<Proxy>('POST', '/api/v1/proxies', input);
+  }): Promise<ProxyRecord> {
+    return this.request<ProxyRecord>("POST", "/api/v1/proxies", input);
   }
 
   deleteProxy(id: string): Promise<void> {
-    return this.request<void>('DELETE', `/api/v1/proxies/${encodeURIComponent(id)}`);
+    return this.request<void>("DELETE", `/api/v1/proxies/${encodeURIComponent(id)}`);
   }
 
-  switchProxy(id: string): Promise<Status> {
-    return this.request<Status>('POST', '/api/v1/switch', { id });
+  /* ── Active proxy (singleton) ───────────────────────────────────────── */
+
+  getActiveProxy(): Promise<Summary> {
+    return this.request<Summary>("GET", "/api/v1/active-proxy");
   }
 
-  rotate(): Promise<Status> {
-    return this.request<Status>('POST', '/api/v1/rotate');
+  setActiveProxy(proxyId: string): Promise<ProxyRecord> {
+    return this.request<ProxyRecord>(
+      "PUT",
+      `/api/v1/active-proxy?proxy_id=${encodeURIComponent(proxyId)}`,
+    );
   }
+
+  clearActiveProxy(): Promise<void> {
+    return this.request<void>("DELETE", "/api/v1/active-proxy");
+  }
+
+  rotateActiveProxy(): Promise<ProxyRecord> {
+    return this.request<ProxyRecord>("POST", "/api/v1/active-proxy/rotate");
+  }
+
+  /* ── Sources ────────────────────────────────────────────────────────── */
 
   listSources(): Promise<Source[]> {
-    return this.request<Source[]>('GET', '/api/v1/sources');
+    return this.request<Source[]>("GET", "/api/v1/sources");
   }
 
-  addSource(url: string): Promise<Source> {
-    return this.request<Source>('POST', '/api/v1/sources', { url });
+  createSource(url: string): Promise<Source> {
+    return this.request<Source>("POST", "/api/v1/sources", { url });
   }
 
-  deleteSource(url: string): Promise<void> {
-    return this.request<void>('DELETE', `/api/v1/sources/${encodeURIComponent(url)}`);
+  deleteSource(id: string): Promise<void> {
+    return this.request<void>("DELETE", `/api/v1/sources/${encodeURIComponent(id)}`);
+  }
+
+  /* ── Scrape runs ────────────────────────────────────────────────────── */
+
+  createScrapeRun(): Promise<void> {
+    return this.request<void>("POST", "/api/v1/scrape-runs");
+  }
+
+  getCurrentScrapeRun(): Promise<ScrapeRun> {
+    return this.request<ScrapeRun>("GET", "/api/v1/scrape-runs/current");
+  }
+
+  /* ── Telemetry ──────────────────────────────────────────────────────── */
+
+  getSummary(): Promise<Summary> {
+    return this.request<Summary>("GET", "/api/v1/summary");
+  }
+
+  getStats(): Promise<Stats> {
+    return this.request<Stats>("GET", "/api/v1/stats");
+  }
+
+  getDns(): Promise<Array<{ ip: string; hostname: string }>> {
+    return this.request<Array<{ ip: string; hostname: string }>>("GET", "/api/v1/dns");
   }
 }
 
 export async function isEngineHealthy(client: EngineClient): Promise<boolean> {
   try {
-    await client.getStatus();
+    await client.getSummary();
     return true;
   } catch {
     return false;
   }
 }
+
+export type { Anonymity };

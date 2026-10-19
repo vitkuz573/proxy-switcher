@@ -98,7 +98,10 @@ impl Router {
         };
 
         // Use hostname from DNS cache if available, fall back to IP
-        let target_host = self.dns_cache.lookup(key.dst_ip).await
+        let target_host = self
+            .dns_cache
+            .lookup(key.dst_ip)
+            .await
             .unwrap_or_else(|| key.dst_ip.to_string());
 
         debug!(
@@ -162,8 +165,9 @@ impl Router {
                     return;
                 }
                 let _ = guard.conn.flush().await;
-                guard.state.client_next_seq =
-                    tcp.sequence_number.wrapping_add(packet.payload.len() as u32);
+                guard.state.client_next_seq = tcp
+                    .sequence_number
+                    .wrapping_add(packet.payload.len() as u32);
             }
         }
 
@@ -241,12 +245,13 @@ impl Router {
             dst_port,
         };
 
-        let dest = SocketAddr::new(
-            std::net::IpAddr::V4(packet.ip.destination),
-            dst_port,
-        );
+        let dest = SocketAddr::new(std::net::IpAddr::V4(packet.ip.destination), dst_port);
 
-        if let Err(e) = self.udp_tracker.send_or_create(&key, dest, udp_payload).await {
+        if let Err(e) = self
+            .udp_tracker
+            .send_or_create(&key, dest, udp_payload)
+            .await
+        {
             debug!("UDP send error: {e}");
         }
     }
@@ -268,13 +273,8 @@ impl Router {
                 }
             }
 
-            let pkt = build_udp_packet(
-                key.dst_ip,
-                key.src_ip,
-                key.dst_port,
-                key.src_port,
-                &payload,
-            );
+            let pkt =
+                build_udp_packet(key.dst_ip, key.src_ip, key.dst_port, key.src_port, &payload);
             responses.push(pkt);
         }
 

@@ -1,0 +1,23 @@
+{
+  "name": "@proxy-switcher/cli",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "ps": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@proxy-switcher/sdk": "workspace:*",
+    "commander": "^15.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

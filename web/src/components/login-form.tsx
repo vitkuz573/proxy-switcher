@@ -1,17 +1,12 @@
 "use client";
 
-import { useRouter } from "next/navigation";
-import { useState, type FormEvent } from "react";
-import { toast } from "sonner";
+import type { Problem } from "@proxy-switcher/sdk";
 import { Server } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { type FormEvent, useState } from "react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
@@ -28,7 +23,7 @@ export function LoginForm() {
     setError(null);
 
     try {
-      const response = await fetch(`/api/v1/auth/login`, {
+      const response = await fetch(`/api/v1/sessions`, {
         method: "POST",
         credentials: "include",
         headers: { "content-type": "application/json" },
@@ -36,10 +31,8 @@ export function LoginForm() {
       });
 
       if (!response.ok) {
-        const body = (await response.json().catch(() => null)) as {
-          message?: string;
-        } | null;
-        setError(body?.message ?? "Sign in failed");
+        const problem = (await response.json().catch(() => null)) as Problem | null;
+        setError(problem?.detail ?? "Sign in failed");
         return;
       }
 

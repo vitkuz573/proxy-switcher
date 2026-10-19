@@ -90,12 +90,18 @@ impl Forwarder {
         Ok(ForwardConnection::Direct(stream))
     }
 
-    pub async fn connect_to(proxy: &ProxyInfo, target: &str, port: u16) -> Result<ForwardConnection> {
+    pub async fn connect_to(
+        proxy: &ProxyInfo,
+        target: &str,
+        port: u16,
+    ) -> Result<ForwardConnection> {
         let proxy_addr = format!("{}:{}", proxy.host, proxy.port);
 
         match proxy.protocol {
             ProxyProtocol::Socks5 => {
-                let stream = Socks5Stream::connect(proxy_addr.as_str(), format!("{target}:{port}").as_str()).await?;
+                let stream =
+                    Socks5Stream::connect(proxy_addr.as_str(), format!("{target}:{port}").as_str())
+                        .await?;
                 Ok(ForwardConnection::Socks5(stream))
             }
             ProxyProtocol::Socks4 => {
@@ -108,9 +114,8 @@ impl Forwarder {
             }
             ProxyProtocol::Http | ProxyProtocol::Https => {
                 let stream = tokio::net::TcpStream::connect(proxy_addr).await?;
-                let connect = format!(
-                    "CONNECT {target}:{port} HTTP/1.1\r\nHost: {target}:{port}\r\n\r\n"
-                );
+                let connect =
+                    format!("CONNECT {target}:{port} HTTP/1.1\r\nHost: {target}:{port}\r\n\r\n");
                 use tokio::io::AsyncWriteExt;
                 let mut s = stream;
                 s.write_all(connect.as_bytes()).await?;
@@ -118,9 +123,13 @@ impl Forwarder {
                 let mut buf = [0u8; 1024];
                 let n = s.read(&mut buf).await?;
                 let response = String::from_utf8_lossy(&buf[..n]);
-                let alive = response.contains("200 Connection established") || response.contains("200 OK");
+                let alive =
+                    response.contains("200 Connection established") || response.contains("200 OK");
                 if !alive {
-                    anyhow::bail!("HTTP CONNECT failed: {}", response.lines().next().unwrap_or("unknown"));
+                    anyhow::bail!(
+                        "HTTP CONNECT failed: {}",
+                        response.lines().next().unwrap_or("unknown")
+                    );
                 }
                 Ok(ForwardConnection::HttpConnect(s))
             }

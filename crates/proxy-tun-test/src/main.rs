@@ -3,6 +3,7 @@ use proxy_core::pool::ProxyPool;
 use proxy_core::proxy::{Anonymity, ProxyInfo, ProxyProtocol};
 use proxy_core::router::Router;
 use proxy_core::tun_manager::{run_forwarding_loop, TunManager};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
@@ -15,9 +16,7 @@ const FWMARK: u32 = 1;
 
 fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| "proxy=info".into()),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "proxy=info".into()))
         .init();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -36,11 +35,12 @@ fn main() {
             latency_ms: Some(500),
             country: None,
             last_checked: None,
+            last_success: None,
+            consecutive_failures: 0,
             score: 100.0,
         };
-        pool.update(vec![proxy]).await;
-        pool.set_active(&format!("{PROXY_HOST}:{PROXY_PORT}"))
-            .await;
+        pool.merge(vec![proxy]).await;
+        pool.set_active(&format!("{PROXY_HOST}:{PROXY_PORT}")).await;
         println!("Proxy: {}", pool.active().await.unwrap().id);
 
         // Detect real gateway and interface BEFORE overriding the route table
@@ -50,7 +50,10 @@ fn main() {
             mtu: 1500,
             disable_ipv6: true,
         });
-        let (gateway, iface) = mgr_temp.detect_gateway().await.expect("detect_gateway failed");
+        let (gateway, iface) = mgr_temp
+            .detect_gateway()
+            .await
+            .expect("detect_gateway failed");
         println!("Real gateway: {gateway}, interface: {iface}");
 
         // Set up fwmark routing so our UDP sockets bypass the TUN (no loop)
@@ -72,7 +75,9 @@ fn main() {
         mgr.create().await.expect("TUN create failed");
 
         // Default route: all IPv4 through TUN
-        mgr.set_default_route().await.expect("set_default_route failed");
+        mgr.set_default_route()
+            .await
+            .expect("set_default_route failed");
         println!("Default route: 0.0.0.0/0 -> ps-tun0");
 
         // Exclude route: proxy IP via real gateway (avoids routing loop)
@@ -88,7 +93,12 @@ fn main() {
         let router_fwd = router.clone();
         let _ = std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(run_forwarding_loop(dev, router_fwd, 1500));
+            rt.block_on(run_forwarding_loop(
+                dev,
+                router_fwd,
+                1500,
+                Arc::new(AtomicBool::new(false)),
+            ));
         });
 
         // Wait for routes and forwarding loop to settle
@@ -99,7 +109,14 @@ fn main() {
         // Full E2E test: DNS goes through TUN → UDP forwarded → cached →
         // TCP SYN uses hostname → proxy CONNECT → response
         let out = std::process::Command::new("timeout")
-            .args(["45", "curl", "-v", "--max-time", "35", "http://httpbin.org/ip"])
+            .args([
+                "45",
+                "curl",
+                "-v",
+                "--max-time",
+                "35",
+                "http://httpbin.org/ip",
+            ])
             .output()
             .expect("curl failed");
 

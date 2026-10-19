@@ -23,24 +23,79 @@ cargo clippy --workspace --all-targets -- -D warnings
 step "Rust: tests"
 cargo test --workspace
 
-step "TypeScript: install"
+step "Node: install"
 pnpm install --frozen-lockfile
 
+step "Biome: lint and format"
+pnpm lint
+
 step "TypeScript: typecheck"
-pnpm -r typecheck
+pnpm typecheck
 
 step "TypeScript: build"
-pnpm -r build
+pnpm build
 
-step "OpenAPI spec matches the committed SDK"
-# Regenerating must be a no-op; a diff here means someone changed a route
-# without refreshing the client.
-cp sdk/src/schema.d.ts sdk/src/schema.d.ts.bak
-pnpm --filter @proxy-switcher/sdk generate >/dev/null 2>&1 || true
-if ! diff -q sdk/src/schema.d.ts sdk/src/schema.d.ts.bak >/dev/null 2>&1; then
-  mv sdk/src/schema.d.ts.bak sdk/src/schema.d.ts
-  fail "sdk/src/schema.d.ts is stale — run 'pnpm sdk:generate' with the API up"
-fi
-rm -f sdk/src/schema.d.ts.bak
+step "Contract tests"
+pnpm --filter @proxy-switcher/api test
+
+step "Web: production build"
+pnpm --filter web build
+
+step "API: contract is served and complete"
+# The contract lives in code now, so the gate is that what the server publishes
+# still satisfies the schema the clients compile against. Regenerating from the
+# live document must not change any operation.
+curl -fsS --max-time 5 http://127.0.0.1:8088/readyz >/dev/null ||
+  fail "API service is not ready on 127.0.0.1:8088"
+
+DOC="$(mktemp)"
+curl -fsS --max-time 5 http://127.0.0.1:8088/docs/json >"$DOC"
+
+python3 - "$DOC" <<'PY'
+import json, sys
+
+doc = json.load(open(sys.argv[1]))
+paths = doc.get("paths", {})
+
+expected = {
+    "/api/v1/active-proxy": {"get", "put", "delete"},
+    "/api/v1/active-proxy/rotate": {"post"},
+    "/api/v1/audit-events": {"get"},
+    "/api/v1/proxies": {"get", "post"},
+    "/api/v1/proxies/{id}": {"get", "delete"},
+    "/api/v1/scrape-runs": {"post"},
+    "/api/v1/scrape-runs/current": {"get"},
+    "/api/v1/sessions": {"post"},
+    "/api/v1/sessions/current": {"get", "delete"},
+    "/api/v1/sources": {"get", "post"},
+    "/api/v1/sources/{id}": {"delete"},
+    "/api/v1/tokens": {"get", "post"},
+    "/api/v1/tokens/exchange": {"post"},
+    "/api/v1/tokens/{id}": {"delete"},
+    "/api/v1/summary": {"get"},
+    "/api/v1/stats": {"get"},
+}
+
+missing = []
+for path, methods in sorted(expected.items()):
+    actual = set(paths.get(path, {}))
+    absent = methods - actual
+    if absent:
+        missing.append(f"{path}: {', '.join(sorted(absent))}")
+
+# A colon in a route is a path parameter to the router, never a literal segment.
+colon = [p for p in paths if ":" in p]
+
+if colon:
+    missing.append(f"routes using a colon, which the router reads as a parameter: {colon}")
+
+if missing:
+    print("contract mismatch:", file=sys.stderr)
+    for line in missing:
+        print(f"  - {line}", file=sys.stderr)
+    sys.exit(1)
+PY
+rm -f "$DOC"
+pass "contract complete"
 
 printf '\n%sAll gates passed.%s\n' "$GREEN" "$RESET"

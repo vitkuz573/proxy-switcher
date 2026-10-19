@@ -9,9 +9,9 @@ fn test_packet_roundtrip() {
         [104, 1, 219, 8].into(),
         49152,
         80,
-        1000,   // client seq
-        0,      // ack (not set in SYN)
-        0x02,   // SYN
+        1000, // client seq
+        0,    // ack (not set in SYN)
+        0x02, // SYN
         &[],
     );
     assert!(!syn.is_empty());
@@ -30,9 +30,9 @@ fn test_packet_roundtrip() {
         [10, 0, 0, 2].into(),
         80,
         49152,
-        50000,  // server ISN
-        1001,   // ack = client seq + 1
-        0x12,   // SYN | ACK
+        50000, // server ISN
+        1001,  // ack = client seq + 1
+        0x12,  // SYN | ACK
         &[],
     );
     assert!(!syn_ack.is_empty());
@@ -54,9 +54,9 @@ fn test_packet_roundtrip() {
         [104, 1, 219, 8].into(),
         49152,
         80,
-        1001,   // seq = client_isn + 1
-        50001,  // ack = server_isn + 1
-        0x18,   // ACK | PSH
+        1001,  // seq = client_isn + 1
+        50001, // ack = server_isn + 1
+        0x18,  // ACK | PSH
         b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
     );
 
@@ -72,9 +72,9 @@ fn test_packet_roundtrip() {
         [10, 0, 0, 2].into(),
         80,
         49152,
-        50001,  // server_next_seq
-        1001 + parsed_data.payload.len() as u32,  // ack = seq + data_len
-        0x18,   // ACK | PSH
+        50001,                                   // server_next_seq
+        1001 + parsed_data.payload.len() as u32, // ack = seq + data_len
+        0x18,                                    // ACK | PSH
         response_payload,
     );
 

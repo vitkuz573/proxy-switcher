@@ -1,15 +1,15 @@
-import 'server-only';
-import { cookies } from 'next/headers';
+import "server-only";
 import {
+  type AuditEvent,
   createProxySwitcherClient,
-  type AuditEntry,
-  type Proxy,
-  type ScrapeStatus,
+  type ProxyRecord,
+  type ScrapeRun,
   type Source,
   type Stats,
-  type Status,
-} from '@proxy-switcher/sdk';
-import { API_INTERNAL_URL, SESSION_COOKIE } from './env';
+  type Summary,
+} from "@proxy-switcher/sdk";
+import { cookies } from "next/headers";
+import { API_INTERNAL_URL, SESSION_COOKIE } from "./env";
 
 /**
  * Server-side API client.
@@ -32,34 +32,34 @@ async function serverClient() {
  * the API is unreachable. Pages decide how to present that; the session itself
  * is validated in `lib/auth.ts`.
  */
-export async function getStatus(): Promise<Status | null> {
-  const { data, error } = await (await serverClient()).GET('/api/v1/status');
-  return error ? null : (data ?? null);
+async function read<T>(operation: () => Promise<T>, fallback: T): Promise<T> {
+  try {
+    return await operation();
+  } catch {
+    return fallback;
+  }
+}
+
+export async function getSummary(): Promise<Summary | null> {
+  return read(() => serverClient().then((api) => api.getSummary()), null);
 }
 
 export async function getStats(): Promise<Stats | null> {
-  const { data, error } = await (await serverClient()).GET('/api/v1/stats');
-  return error ? null : (data ?? null);
+  return read(() => serverClient().then((api) => api.getStats()), null);
 }
 
-export async function getProxies(): Promise<Proxy[]> {
-  const { data, error } = await (await serverClient()).GET('/api/v1/proxies');
-  return error ? [] : ((data as Proxy[] | undefined) ?? []);
+export async function getProxies(limit = 100): Promise<ProxyRecord[]> {
+  return read(() => serverClient().then((api) => api.listProxies({ limit })), []);
 }
 
-export async function getScrapeStatus(): Promise<ScrapeStatus | null> {
-  const { data, error } = await (await serverClient()).GET('/api/v1/scrape/status');
-  return error ? null : (data ?? null);
+export async function getScrapeRun(): Promise<ScrapeRun | null> {
+  return read(() => serverClient().then((api) => api.getCurrentScrapeRun()), null);
 }
 
 export async function getSources(): Promise<Source[]> {
-  const { data, error } = await (await serverClient()).GET('/api/v1/sources');
-  return error ? [] : ((data as Source[] | undefined) ?? []);
+  return read(() => serverClient().then((api) => api.listSources()), []);
 }
 
-export async function getAudit(limit = 100): Promise<AuditEntry[]> {
-  const { data, error } = await (await serverClient()).GET('/api/v1/audit', {
-    params: { query: { limit } },
-  });
-  return error ? [] : ((data as AuditEntry[] | undefined) ?? []);
+export async function getAuditEvents(limit = 100): Promise<AuditEvent[]> {
+  return read(() => serverClient().then((api) => api.listAuditEvents({ limit })), []);
 }

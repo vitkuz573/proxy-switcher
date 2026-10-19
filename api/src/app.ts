@@ -1,33 +1,32 @@
-import cookie from '@fastify/cookie';
-import helmet from '@fastify/helmet';
-import rateLimit from '@fastify/rate-limit';
-import swagger from '@fastify/swagger';
-import swaggerUi from '@fastify/swagger-ui';
-import addFormats from 'ajv-formats';
+import type { DatabaseSync } from "node:sqlite";
+import cookie from "@fastify/cookie";
+import helmet from "@fastify/helmet";
+import rateLimit from "@fastify/rate-limit";
+import swagger from "@fastify/swagger";
+import swaggerUi from "@fastify/swagger-ui";
+import addFormats from "ajv-formats";
 import Fastify, {
   type FastifyError,
   type FastifyInstance,
   type FastifyServerOptions,
-} from 'fastify';
-
-import type { Config } from './config.js';
-import { EngineClient, isEngineHealthy } from './engine/client.js';
-import { authPlugin } from './plugins/auth.js';
-import { errorBody } from './plugins/errors.js';
-import type { DatabaseSync } from 'node:sqlite';
-import { enginePlugin } from './plugins/engine.js';
-import { rbacPlugin } from './plugins/rbac.js';
-import { authRoutes } from './routes/auth.js';
-import { operationRoutes } from './routes/operations.js';
-import { SCHEMAS } from './schemas/index.js';
-import type { AuthContext } from './services/auth.js';
+} from "fastify";
+import type { Config } from "./config.js";
+import { EngineClient, isEngineHealthy } from "./engine/client.js";
+import { authPlugin } from "./plugins/auth.js";
+import { enginePlugin } from "./plugins/engine.js";
+import { PROBLEM_CONTENT_TYPE, problem } from "./plugins/errors.js";
+import { rbacPlugin } from "./plugins/rbac.js";
+import { authRoutes } from "./routes/auth.js";
+import { operationRoutes } from "./routes/operations.js";
+import { SCHEMAS } from "./schemas/index.js";
+import type { AuthContext } from "./services/auth.js";
 
 /**
  * `ajv-formats` ships CommonJS typings that do not line up with Fastify's
  * `Plugin` alias, though the runtime shape is exactly what Fastify expects.
  */
 const AJV_PLUGINS = [addFormats] as unknown as NonNullable<
-  NonNullable<FastifyServerOptions['ajv']>['plugins']
+  NonNullable<FastifyServerOptions["ajv"]>["plugins"]
 >;
 
 /**
@@ -40,21 +39,30 @@ const REF_RESOLVER = {
     if (!json.title && json.$id) {
       json.title = json.$id;
     }
-    return json.$id ?? json.title ?? 'schema';
+    return json.$id ?? json.title ?? "schema";
   },
 };
 
 export interface BuildAppOptions {
   config: Config;
   db: DatabaseSync;
+  /**
+   * Transport for the internal engine. Contract tests substitute a stand-in so
+   * routing and status mapping can be verified without a running daemon.
+   */
+  engineFetch?: typeof globalThis.fetch;
 }
 
-export async function buildApp({ config, db }: BuildAppOptions): Promise<FastifyInstance> {
+export async function buildApp({
+  config,
+  db,
+  engineFetch,
+}: BuildAppOptions): Promise<FastifyInstance> {
   const app: FastifyInstance = Fastify({
     logger: {
       level: config.LOG_LEVEL,
       // Never log cookies or authorization headers.
-      redact: ['req.headers.authorization', 'req.headers.cookie'],
+      redact: ["req.headers.authorization", "req.headers.cookie"],
     },
     trustProxy: true,
     bodyLimit: 1_048_576,
@@ -72,27 +80,27 @@ export async function buildApp({ config, db }: BuildAppOptions): Promise<Fastify
   };
 
   // Registered before swagger so every `Type.Ref` resolves to a named component.
-// Fastify v5 derives the shared-schema key from the schema's `$id`.
-for (const schema of Object.values(SCHEMAS)) {
-  app.addSchema(schema);
-}
+  // Fastify v5 derives the shared-schema key from the schema's `$id`.
+  for (const schema of Object.values(SCHEMAS)) {
+    app.addSchema(schema);
+  }
 
   // Registered before routes so the generated document sees every schema.
   await app.register(swagger, {
     openapi: {
-      openapi: '3.1.0',
+      openapi: "3.1.0",
       info: {
-        title: 'Proxy Switcher API',
-        version: '2.0.0',
+        title: "Proxy Switcher API",
+        version: "2.0.0",
         description:
-          'Public control plane for the proxy-switcher engine. Two client models are ' +
-          'supported: browsers authenticate with a session cookie, CLIs with a bearer token.',
+          "Public control plane for the proxy-switcher engine. Two client models are " +
+          "supported: browsers authenticate with a session cookie, CLIs with a bearer token.",
       },
       servers: [{ url: `http://${config.API_HOST}:${config.API_PORT}` }],
       components: {
         securitySchemes: {
-          sessionCookie: { type: 'apiKey', in: 'cookie', name: 'ps_session' },
-          bearerToken: { type: 'http', scheme: 'bearer' },
+          sessionCookie: { type: "apiKey", in: "cookie", name: "ps_session" },
+          bearerToken: { type: "http", scheme: "bearer" },
         },
       },
       security: [{ sessionCookie: [] }, { bearerToken: [] }],
@@ -102,7 +110,7 @@ for (const schema of Object.values(SCHEMAS)) {
     refResolver: REF_RESOLVER,
   });
 
-  await app.register(swaggerUi, { routePrefix: '/docs' });
+  await app.register(swaggerUi, { routePrefix: "/docs" });
 
   await app.register(helmet, {
     contentSecurityPolicy: false,
@@ -117,68 +125,83 @@ for (const schema of Object.values(SCHEMAS)) {
     keyGenerator: (req) => req.principal?.tokenId ?? req.principal?.userId ?? req.ip,
   });
 
-  await app.register(enginePlugin, { engine: EngineClient.fromConfig(config) });
+  await app.register(enginePlugin, { engine: EngineClient.fromConfig(config, engineFetch) });
   await app.register(authPlugin, { auth });
   await app.register(rbacPlugin);
 
-  /* ── Liveness and readiness: public, no auth ─────────────────────────── */
+  /* ── Operations: public, no auth ─────────────────────────────────────── */
 
+  /**
+   * Every failure leaves as an RFC 9457 problem document. Clients get one shape
+   * to handle, and internal detail never crosses the boundary.
+   *
+   * Installed before any route: Fastify captures the handler when a route is
+   * registered, so one added afterwards never sees validation failures.
+   */
+  app.setErrorHandler((err: FastifyError, req, reply) => {
+    const status = err.statusCode ?? 500;
+    const instance = req.url;
+
+    if (status >= 500) {
+      req.log.error({ err }, "unhandled error");
+    }
+
+    const send = (code: number, detail: string) =>
+      reply
+        .code(code)
+        .type(PROBLEM_CONTENT_TYPE)
+        .send(problem(code, detail, { instance }));
+
+    if (err.validation) {
+      return send(400, "Request validation failed");
+    }
+    if (status === 429) {
+      return send(429, "Rate limit exceeded");
+    }
+    if (status >= 400 && status < 500) {
+      return send(status, err.message);
+    }
+
+    // Internal detail stays in the log, never in the response.
+    return send(500, "Internal server error");
+  });
+
+  app.setNotFoundHandler(async (req, reply) => {
+    return reply
+      .code(404)
+      .type(PROBLEM_CONTENT_TYPE)
+      .send(problem(404, `No route for ${req.method} ${req.url}`, { instance: req.url }));
+  });
+
+  // Kubernetes-style names: /healthz is liveness, /readyz is readiness.
   app.get(
-    '/health',
+    "/healthz",
     {
-      schema: { tags: ['ops'], summary: 'Liveness probe', hide: true },
+      schema: { tags: ["ops"], summary: "Liveness probe", hide: true },
     },
-    async () => ({ status: 'ok' }),
+    async () => ({ status: "ok" }),
   );
 
   app.get(
-    '/ready',
+    "/readyz",
     {
       schema: {
-        tags: ['ops'],
-        summary: 'Readiness probe including engine reachability',
+        tags: ["ops"],
+        summary: "Readiness probe including engine reachability",
       },
     },
     async (_req, reply) => {
       const engineOk = await isEngineHealthy(app.engine);
       return reply.code(engineOk ? 200 : 503).send({
-        status: engineOk ? 'ready' : 'degraded',
-        engine: engineOk ? 'up' : 'down',
+        status: engineOk ? "ready" : "degraded",
+        engine: engineOk ? "up" : "down",
       });
     },
   );
 
   await app.register(async (instance) => {
-    await authRoutes(instance, { secureCookies: config.NODE_ENV === 'production' });
+    await authRoutes(instance);
     await operationRoutes(instance);
-  });
-
-  app.setErrorHandler((err: FastifyError, req, reply) => {
-    const status = err.statusCode ?? 500;
-
-    if (status >= 500) {
-      req.log.error({ err }, 'unhandled error');
-    }
-
-    // Schema validation failures are the client's problem and are safe to echo.
-    if (err.validation) {
-      return reply.code(400).send(errorBody(400, 'Request validation failed', err.validation));
-    }
-
-    if (status === 429) {
-      return reply.code(429).send(errorBody(429, 'Rate limit exceeded'));
-    }
-
-    if (status >= 400 && status < 500) {
-      return reply.code(status).send(errorBody(status, err.message));
-    }
-
-    // Internal details stay in the log, never in the response.
-    return reply.code(500).send(errorBody(500, 'Internal server error'));
-  });
-
-  app.setNotFoundHandler(async (_req, reply) => {
-    return reply.code(404).send(errorBody(404, 'Route not found'));
   });
 
   return app;

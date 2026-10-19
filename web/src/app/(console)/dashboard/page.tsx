@@ -1,8 +1,8 @@
 import { Activity, Globe, RefreshCw, Server } from "lucide-react";
-import { Card, CardContent } from "@/components/ui/card";
+import { HealthProgress, IDLE_SCRAPE_RUN } from "@/components/health-progress";
 import { Badge } from "@/components/ui/badge";
-import { HealthProgress, type ScrapeState } from "@/components/health-progress";
-import { getScrapeStatus, getStats, getStatus } from "@/lib/api";
+import { Card, CardContent } from "@/components/ui/card";
+import { getScrapeRun, getStats, getSummary } from "@/lib/api";
 
 export const metadata = { title: "Dashboard" };
 
@@ -25,14 +25,14 @@ export default function DashboardPage() {
 }
 
 async function StatsRow() {
-  const [status, stats] = await Promise.all([getStatus(), getStats()]);
+  const [summary, stats] = await Promise.all([getSummary(), getStats()]);
 
   return (
     <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
       <Stat
         icon={<Server className="size-4" />}
         label="Pool size"
-        value={status?.pool_size ?? 0}
+        value={summary?.pool_size ?? 0}
         hint="proxies in the engine pool"
       />
       <Stat
@@ -58,18 +58,7 @@ async function StatsRow() {
 }
 
 async function ScraperPanel() {
-  const scrape = await getScrapeStatus();
-
-  const initial: ScrapeState = scrape ?? {
-    running: false,
-    checking_progress: null,
-    proxies_found: 0,
-    healthy_count: 0,
-    last_run: null,
-    errors: [],
-  };
-
-  return <HealthProgress initial={initial} />;
+  return <HealthProgress initial={(await getScrapeRun()) ?? IDLE_SCRAPE_RUN} />;
 }
 
 function Stat({

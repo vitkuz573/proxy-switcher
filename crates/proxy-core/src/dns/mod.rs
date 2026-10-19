@@ -1,21 +1,28 @@
 use anyhow::Result;
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::TokioResolver;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub struct DnsHandler {
-    resolver: TokioAsyncResolver,
+    resolver: TokioResolver,
 }
 
 impl DnsHandler {
     pub fn new() -> Self {
-        let resolver = TokioAsyncResolver::tokio(
+        // Built from an explicit default configuration rather than the system
+        // resolver, so name resolution does not change with /etc/resolv.conf.
+        let resolver = TokioResolver::builder_with_config(
             ResolverConfig::default(),
-            ResolverOpts::default(),
-        );
+            TokioRuntimeProvider::default(),
+        )
+        .with_options(ResolverOpts::default())
+        .build()
+        .expect("the default resolver configuration is valid");
+
         Self { resolver }
     }
 
@@ -128,7 +135,12 @@ pub fn parse_dns_response(data: &[u8]) -> Vec<(String, Ipv4Addr)> {
         offset += 10;
 
         if atype == 1 && rdlength == 4 && offset + 4 <= data.len() {
-            let ip = Ipv4Addr::new(data[offset], data[offset + 1], data[offset + 2], data[offset + 3]);
+            let ip = Ipv4Addr::new(
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            );
             if !query_name.is_empty() {
                 results.push((query_name.clone(), ip));
             }
@@ -221,8 +233,7 @@ mod tests {
             0x00, 0x00, // 0 authority
             0x00, 0x00, // 0 additional
             // Question: httpbin.org = 7httpbin3org0
-            0x07, b'h', b't', b't', b'p', b'b', b'i', b'n',
-            0x03, b'o', b'r', b'g',
+            0x07, b'h', b't', b't', b'p', b'b', b'i', b'n', 0x03, b'o', b'r', b'g',
             0x00, // end of name
             0x00, 0x01, // type A
             0x00, 0x01, // class IN
@@ -236,8 +247,14 @@ mod tests {
         ];
 
         let results = parse_dns_response(&pkt);
-        assert!(!results.is_empty(), "should have parsed at least one record");
-        assert_eq!(results[0].0, "httpbin.org", "hostname should be httpbin.org");
+        assert!(
+            !results.is_empty(),
+            "should have parsed at least one record"
+        );
+        assert_eq!(
+            results[0].0, "httpbin.org",
+            "hostname should be httpbin.org"
+        );
         assert_eq!(results[0].1, Ipv4Addr::new(52, 5, 245, 178));
     }
 }

@@ -1,4 +1,4 @@
-import 'server-only';
+import "server-only";
 
 /**
  * Server-only network configuration.
@@ -17,16 +17,16 @@ function resolveUrl(name: string, fallback: string): string {
   if (value) {
     return value;
   }
-  if (process.env.NODE_ENV === 'production') {
+  if (process.env.NODE_ENV === "production") {
     console.warn(
       `[env] ${name} is unset, falling back to ${fallback}. ` +
-        'Set it before serving this app outside the host.',
+        "Set it before serving this app outside the host.",
     );
   }
   return fallback;
 }
 
-export const API_INTERNAL_URL = resolveUrl('API_INTERNAL_URL', 'http://127.0.0.1:8088');
+export const API_INTERNAL_URL = resolveUrl("API_INTERNAL_URL", "http://127.0.0.1:8088");
 
 /** Name of the API's session cookie. Kept in sync with `api/src/plugins/auth.ts`. */
-export const SESSION_COOKIE = 'ps_session';
+export const SESSION_COOKIE = "ps_session";

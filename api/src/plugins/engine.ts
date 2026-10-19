@@ -1,7 +1,7 @@
-import fp from 'fastify-plugin';
-import type { EngineClient } from '../engine/client.js';
+import fp from "fastify-plugin";
+import type { EngineClient } from "../engine/client.js";
 
-declare module 'fastify' {
+declare module "fastify" {
   interface FastifyInstance {
     engine: EngineClient;
   }
@@ -12,5 +12,5 @@ declare module 'fastify' {
  * attached to the instance so route handlers never build URLs themselves.
  */
 export const enginePlugin = fp(async (app, opts: { engine: EngineClient }) => {
-  app.decorate('engine', opts.engine);
+  app.decorate("engine", opts.engine);
 });

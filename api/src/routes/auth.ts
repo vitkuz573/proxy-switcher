@@ -1,8 +1,8 @@
-import { Type } from '@sinclair/typebox';
-import type { FastifyInstance } from 'fastify';
-import { SESSION_COOKIE } from '../plugins/auth.js';
-import { errorBody } from '../plugins/errors.js';
-import { Ref } from '../schemas/index.js';
+import { Type } from "@sinclair/typebox";
+import type { FastifyInstance, FastifyRequest } from "fastify";
+import { SESSION_COOKIE } from "../plugins/auth.js";
+import { PROBLEM_CONTENT_TYPE, problem } from "../plugins/errors.js";
+import { Ref } from "../schemas/index.js";
 import {
   authenticate,
   countUsers,
@@ -13,16 +13,11 @@ import {
   listApiTokens,
   recordAudit,
   revokeApiToken,
-} from '../services/auth.js';
-
-const LoginBody = Type.Object({
-  email: Type.String({ format: 'email' }),
-  password: Type.String({ minLength: 1 }),
-});
+} from "../services/auth.js";
 
 /**
- * Brute-force damping for password endpoints. In-memory on purpose: it is a
- * speed bump against online guessing, not a durable quota.
+ * Brute-force damping for credential endpoints. In-memory on purpose: a speed
+ * bump against online guessing, not a durable quota.
  */
 class AttemptLimiter {
   private readonly attempts = new Map<string, { count: number; resetAt: number }>();
@@ -68,7 +63,7 @@ class AttemptLimiter {
 const toPublicUser = (user: {
   id: string;
   email: string;
-  role: 'admin' | 'operator' | 'viewer';
+  role: "admin" | "operator" | "viewer";
   created_at: number;
 }) => ({
   id: user.id,
@@ -93,93 +88,164 @@ const toPublicToken = (row: {
   last_used_at: row.last_used_at === null ? null : new Date(row.last_used_at).toISOString(),
 });
 
-export async function authRoutes(app: FastifyInstance, opts: { secureCookies: boolean }): Promise<void> {
+/**
+ * The authenticated principal.
+ *
+ * `app.authenticate` has already run and rejects with 401 when there is none, so
+ * the remaining case is a programming error — reaching a handler that declares
+ * it but forgot the guard. Failing loudly beats an assertion that silently
+ * produces `undefined`.
+ */
+function principalOf(req: FastifyRequest): NonNullable<FastifyRequest["principal"]> {
+  const principal = req.principal;
+  if (!principal) {
+    throw new Error(`${req.method} ${req.url} is missing the authenticate preHandler`);
+  }
+  return principal;
+}
+
+const Credentials = Type.Object({
+  email: Type.String({ format: "email", maxLength: 320 }),
+  // Input length only; stored hashes are argon2id regardless.
+  password: Type.String({ minLength: 1, maxLength: 200 }),
+});
+
+export async function authRoutes(app: FastifyInstance): Promise<void> {
   const limiter = new AttemptLimiter(10, 15 * 60_000);
   const db = app.auth.db;
 
-  const cookieOptions = {
-    path: '/',
+  /**
+   * The session cookie is marked `Secure` only when the request actually
+   * arrived over TLS.
+   *
+   * Keying it off `NODE_ENV` instead is wrong in both directions: behind a
+   * plain-HTTP loopback deployment the browser silently refuses to store the
+   * cookie, so login never completes, while a real TLS deployment reached
+   * through a proxy needs the flag whatever the environment says.
+   * `trustProxy` is enabled, so `req.protocol` already reflects
+   * `X-Forwarded-Proto` from a terminating reverse proxy.
+   */
+  const cookieOptions = (req: FastifyRequest) => ({
+    path: "/",
     httpOnly: true,
-    sameSite: 'lax' as const,
-    secure: opts.secureCookies,
-  };
+    sameSite: "lax" as const,
+    secure: req.protocol === "https",
+  });
 
-  /* ── Session lifecycle (Web) ─────────────────────────────────────────── */
+  /* ── Sessions (browser) ──────────────────────────────────────────────── */
 
   app.post(
-    '/api/v1/auth/login',
+    "/api/v1/sessions",
     {
       schema: {
-        tags: ['auth'],
-        summary: 'Exchange credentials for a session cookie',
-        body: LoginBody,
+        tags: ["auth"],
+        summary: "Authenticate a browser and start a session",
+        body: Credentials,
         response: {
-          200: { type: 'object', properties: { user: Ref('User') } },
-          401: errorSchema(),
-          429: errorSchema(),
+          201: { type: "object", properties: { user: Ref("User") } },
+          401: Ref("Problem"),
+          429: Ref("Problem"),
         },
       },
     },
     async (req, reply) => {
       const { email, password } = req.body as { email: string; password: string };
       const ip = app.clientIp(req);
-      const limiterKey = `${ip ?? 'unknown'}:${email.toLowerCase()}`;
 
-      const limit = limiter.check(limiterKey);
+      const limit = limiter.check(`${ip ?? "unknown"}:${email.toLowerCase()}`);
       if (!limit.allowed) {
         return reply
           .code(429)
-          .header('retry-after', String(limit.retryAfterSec))
-          .send(errorBody(429, 'Too many failed attempts'));
+          .header("retry-after", String(limit.retryAfterSec))
+          .type(PROBLEM_CONTENT_TYPE)
+          .send(problem(429, "Too many failed attempts"));
       }
 
       const user = await authenticate(app.auth, email, password);
 
       if (!user) {
         recordAudit(db, {
-          actorType: 'anonymous',
+          actorType: "anonymous",
           actorId: null,
-          action: 'auth.login',
-          outcome: 'denied',
+          action: "session.create",
+          outcome: "denied",
           ip,
           detail: email.toLowerCase(),
         });
-        return reply.code(401).send(errorBody(401, 'Invalid email or password'));
+        return reply
+          .code(401)
+          .type(PROBLEM_CONTENT_TYPE)
+          .send(problem(401, "Invalid email or password"));
       }
 
-      limiter.clear(limiterKey);
+      limiter.clear(`${ip ?? "unknown"}:${email.toLowerCase()}`);
 
       const session = createSession(app.auth, user.id, {
         ...(ip === null ? {} : { ip }),
-        ...(req.headers['user-agent'] === undefined
+        ...(req.headers["user-agent"] === undefined
           ? {}
-          : { userAgent: req.headers['user-agent'] }),
+          : { userAgent: req.headers["user-agent"] }),
       });
 
       reply.setCookie(SESSION_COOKIE, session.id, {
-        ...cookieOptions,
+        ...cookieOptions(req),
         expires: new Date(session.expires_at),
       });
 
       recordAudit(db, {
-        actorType: 'user',
+        actorType: "user",
         actorId: user.id,
-        action: 'auth.login',
-        outcome: 'allowed',
+        action: "session.create",
+        outcome: "allowed",
         ip,
       });
 
-      return { user: toPublicUser(user) };
+      // 201: a session was created, and Location points at it.
+      reply.header("location", "/api/v1/sessions/current");
+      return reply.code(201).send({ user: toPublicUser(user) });
     },
   );
 
-  app.post(
-    '/api/v1/auth/logout',
+  app.get(
+    "/api/v1/sessions/current",
+    {
+      preHandler: app.authenticate,
+      schema: {
+        tags: ["auth"],
+        summary: "The principal behind the current session",
+        response: {
+          200: { type: "object", properties: { user: Ref("User") } },
+          401: Ref("Problem"),
+        },
+      },
+    },
+    async (req) => {
+      const principal = principalOf(req);
+      const row = app.auth.db
+        .prepare("SELECT * FROM users WHERE id = ?")
+        .get(principal.userId) as Parameters<typeof toPublicUser>[0];
+
+      if (!row) {
+        return {
+          user: toPublicUser({
+            id: principal.userId,
+            email: principal.email,
+            role: principal.role,
+            created_at: 0,
+          }),
+        };
+      }
+      return { user: toPublicUser(row) };
+    },
+  );
+
+  app.delete(
+    "/api/v1/sessions/current",
     {
       schema: {
-        tags: ['auth'],
-        summary: 'Destroy the current session',
-        response: { 204: { type: 'null' } },
+        tags: ["auth"],
+        summary: "Destroy the current session",
+        response: { 204: { type: "null" } },
       },
     },
     async (req, reply) => {
@@ -187,14 +253,14 @@ export async function authRoutes(app: FastifyInstance, opts: { secureCookies: bo
       if (sessionId) {
         destroySession(app.auth, sessionId);
       }
-      reply.clearCookie(SESSION_COOKIE, { path: '/' });
+      reply.clearCookie(SESSION_COOKIE, { path: "/" });
 
       if (req.principal) {
         recordAudit(db, {
-          actorType: req.principal.kind === 'token' ? 'token' : 'user',
+          actorType: req.principal.kind === "token" ? "token" : "user",
           actorId: req.principal.tokenId ?? req.principal.userId,
-          action: 'auth.logout',
-          outcome: 'allowed',
+          action: "session.delete",
+          outcome: "allowed",
           ip: app.clientIp(req),
         });
       }
@@ -203,102 +269,165 @@ export async function authRoutes(app: FastifyInstance, opts: { secureCookies: bo
     },
   );
 
-  /* ── Identity ────────────────────────────────────────────────────────── */
-
-  app.get(
-    '/api/v1/auth/me',
-    {
-      preHandler: app.authenticate,
-      schema: {
-        tags: ['auth'],
-        summary: 'The authenticated principal',
-        response: { 200: { type: 'object', properties: { user: Ref('User') } } },
-      },
-    },
-    async (req) => {
-      const principal = req.principal!;
-      const row = db.prepare('SELECT * FROM users WHERE id = ?').get(principal.userId) as
-        | Parameters<typeof toPublicUser>[0]
-        | undefined;
-      return { user: toPublicUser(row!) };
-    },
-  );
-
-  /* ── API tokens (CLI) ────────────────────────────────────────────────── */
-
-  app.get(
-    '/api/v1/tokens',
-    {
-      preHandler: app.authenticate,
-      schema: {
-        tags: ['auth'],
-        summary: 'List the caller\'s API tokens',
-        response: {
-          200: { type: 'array', items: Ref('ApiToken') },
-        },
-      },
-    },
-    async (req) => {
-      const principal = req.principal!;
-      return listApiTokens(db, principal.userId).map(toPublicToken);
-    },
-  );
+  /* ── Tokens ──────────────────────────────────────────────────────────── */
 
   app.post(
-    '/api/v1/tokens',
+    "/api/v1/tokens",
     {
       preHandler: app.authenticate,
       schema: {
-        tags: ['auth'],
-        summary: 'Issue a new API token for the CLI',
+        tags: ["auth"],
+        summary: "Issue an API token for the caller",
         body: Type.Object({ name: Type.String({ minLength: 1, maxLength: 64 }) }),
-        response: { 201: Ref('CreatedApiToken'), 400: errorSchema() },
+        response: { 201: Ref("CreatedApiToken"), 401: Ref("Problem") },
       },
     },
     async (req, reply) => {
-      const principal = req.principal!;
+      const principal = principalOf(req);
       const { name } = req.body as { name: string };
 
       const { token, row } = createApiToken(app.auth, principal.userId, name);
 
       recordAudit(db, {
-        actorType: principal.kind === 'token' ? 'token' : 'user',
+        actorType: principal.kind === "token" ? "token" : "user",
         actorId: principal.tokenId ?? principal.userId,
-        action: 'token.create',
+        action: "token.create",
         target: name,
-        outcome: 'allowed',
+        outcome: "allowed",
         ip: app.clientIp(req),
       });
 
+      reply.header("location", `/api/v1/tokens/${row.id}`);
       return reply.code(201).send({ token, api_token: toPublicToken(row) });
     },
   );
 
-  app.delete(
-    '/api/v1/tokens/{id}',
+  // Credential grant for CLIs. Public because this *is* the authentication step
+  // for a client with no cookie jar; rate limited and audited like any attempt.
+  //
+  // `/exchange` sits beside `/tokens/{id}` safely: the router prefers a static
+  // segment over a parameter, and token ids are UUIDs, so no real id can ever
+  // collide with this name.
+  app.post(
+    "/api/v1/tokens/exchange",
     {
-      preHandler: app.authenticate,
       schema: {
-        tags: ['auth'],
-        summary: 'Revoke an API token',
-        params: Type.Object({ id: Type.String({ format: 'uuid' }) }),
-        response: { 204: { type: 'null' }, 404: errorSchema() },
+        tags: ["auth"],
+        summary: "Exchange credentials for an API token (CLI sign-in)",
+        body: Type.Object({
+          ...Credentials.properties,
+          name: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
+        }),
+        response: {
+          201: {
+            type: "object",
+            properties: {
+              token: Type.String(),
+              api_token: Ref("ApiToken"),
+              user: Ref("User"),
+            },
+          },
+          401: Ref("Problem"),
+          429: Ref("Problem"),
+        },
       },
     },
     async (req, reply) => {
-      const principal = req.principal!;
+      const { email, password, name } = req.body as {
+        email: string;
+        password: string;
+        name?: string;
+      };
+      const ip = app.clientIp(req);
+
+      const limit = limiter.check(`${ip ?? "unknown"}:${email.toLowerCase()}`);
+      if (!limit.allowed) {
+        return reply
+          .code(429)
+          .header("retry-after", String(limit.retryAfterSec))
+          .type(PROBLEM_CONTENT_TYPE)
+          .send(problem(429, "Too many failed attempts"));
+      }
+
+      const user = await authenticate(app.auth, email, password);
+
+      if (!user) {
+        recordAudit(db, {
+          actorType: "anonymous",
+          actorId: null,
+          action: "token.exchange",
+          outcome: "denied",
+          ip,
+          detail: email.toLowerCase(),
+        });
+        return reply
+          .code(401)
+          .type(PROBLEM_CONTENT_TYPE)
+          .send(problem(401, "Invalid email or password"));
+      }
+
+      limiter.clear(`${ip ?? "unknown"}:${email.toLowerCase()}`);
+
+      const { token, row } = createApiToken(
+        app.auth,
+        user.id,
+        name?.trim() || `cli:${ip ?? "unknown"}`,
+      );
+
+      recordAudit(db, {
+        actorType: "user",
+        actorId: user.id,
+        action: "token.exchange",
+        target: row.prefix,
+        outcome: "allowed",
+        ip,
+      });
+
+      reply.header("location", `/api/v1/tokens/${row.id}`);
+      return reply
+        .code(201)
+        .send({ token, api_token: toPublicToken(row), user: toPublicUser(user) });
+    },
+  );
+
+  app.get(
+    "/api/v1/tokens",
+    {
+      preHandler: app.authenticate,
+      schema: {
+        tags: ["auth"],
+        summary: "List the caller's tokens",
+        response: { 200: { type: "array", items: Ref("ApiToken") }, 401: Ref("Problem") },
+      },
+    },
+    async (req) => listApiTokens(db, principalOf(req).userId).map(toPublicToken),
+  );
+
+  app.delete(
+    "/api/v1/tokens/:id",
+    {
+      preHandler: app.authenticate,
+      schema: {
+        tags: ["auth"],
+        summary: "Revoke a token",
+        params: Type.Object({ id: Type.String({ format: "uuid" }) }),
+        response: { 204: { type: "null" }, 404: Ref("Problem"), 401: Ref("Problem") },
+      },
+    },
+    async (req, reply) => {
+      const principal = principalOf(req);
       const { id } = req.params as { id: string };
 
       if (!revokeApiToken(db, principal.userId, id)) {
-        return reply.code(404).send(errorBody(404, 'Token not found'));
+        return reply.code(404).type(PROBLEM_CONTENT_TYPE).send(problem(404, "Token not found"));
       }
 
       recordAudit(db, {
-        actorType: principal.kind === 'token' ? 'token' : 'user',
+        actorType: principal.kind === "token" ? "token" : "user",
         actorId: principal.tokenId ?? principal.userId,
-        action: 'token.revoke',
+        action: "token.delete",
         target: id,
-        outcome: 'allowed',
+        outcome: "allowed",
         ip: app.clientIp(req),
       });
 
@@ -306,87 +435,46 @@ export async function authRoutes(app: FastifyInstance, opts: { secureCookies: bo
     },
   );
 
-  /* ── Audit log ───────────────────────────────────────────────────────── */
-
-  app.get(
-    '/api/v1/audit',
-    {
-      preHandler: [app.authenticate, app.requireRole('admin')],
-      schema: {
-        tags: ['auth'],
-        summary: 'Read the audit log',
-        querystring: Type.Object({
-          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500, default: 100 })),
-        }),
-        response: { 200: { type: 'array', items: Ref('AuditEntry') } },
-      },
-    },
-    async (req) => {
-      const { limit } = req.query as { limit: number };
-      const rows = db
-        .prepare('SELECT * FROM audit_log ORDER BY ts DESC LIMIT ?')
-        .all(limit) as Array<Record<string, unknown>>;
-
-      return rows.map((row) => ({
-        id: row.id as number,
-        ts: new Date(row.ts as number).toISOString(),
-        actor_type: row.actor_type as string,
-        actor_id: (row.actor_id as string | null) ?? null,
-        action: row.action as string,
-        target: (row.target as string | null) ?? null,
-        outcome: row.outcome as string,
-        ip: (row.ip as string | null) ?? null,
-        detail: (row.detail as string | null) ?? null,
-      }));
-    },
-  );
-
   /* ── First-run bootstrap ─────────────────────────────────────────────── */
 
   // Only usable while no users exist; becomes inert immediately afterwards.
   app.post(
-    '/api/v1/auth/bootstrap',
+    "/api/v1/bootstrap",
     {
       schema: {
-        tags: ['auth'],
-        summary: 'Create the first administrator (refused once any user exists)',
+        tags: ["auth"],
+        summary: "Create the first administrator (refused once any user exists)",
         body: Type.Object({
-          email: Type.String({ format: 'email' }),
-          // Floor lowered to 8 by operator decision (2026-10-19). The stored
-          // hash is argon2id regardless; this only bounds the input length.
+          email: Type.String({ format: "email", maxLength: 320 }),
+          // Floor lowered to 8 by operator decision (2026-10-19).
           password: Type.String({ minLength: 8, maxLength: 200 }),
         }),
-        response: { 201: { type: 'object', properties: { user: Ref('User') } }, 409: errorSchema() },
+        response: {
+          201: { type: "object", properties: { user: Ref("User") } },
+          409: Ref("Problem"),
+        },
       },
     },
     async (req, reply) => {
       if (countUsers(db) > 0) {
-        return reply.code(409).send(errorBody(409, 'Bootstrap is already complete'));
+        return reply
+          .code(409)
+          .type(PROBLEM_CONTENT_TYPE)
+          .send(problem(409, "Bootstrap is already complete"));
       }
 
       const { email, password } = req.body as { email: string; password: string };
-      const user = await createUser(app.auth, email, password, 'admin');
+      const user = await createUser(app.auth, email, password, "admin");
 
       recordAudit(db, {
-        actorType: 'user',
+        actorType: "user",
         actorId: user.id,
-        action: 'auth.bootstrap',
-        outcome: 'allowed',
+        action: "bootstrap.create",
+        outcome: "allowed",
         ip: app.clientIp(req),
       });
 
       return reply.code(201).send({ user: toPublicUser(user) });
     },
   );
-}
-
-function errorSchema() {
-  return {
-    type: 'object',
-    properties: {
-      error: { type: 'string' },
-      message: { type: 'string' },
-      details: {},
-    },
-  } as const;
 }

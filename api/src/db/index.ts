@@ -1,6 +1,6 @@
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 
 /**
  * Uses Node's built-in SQLite rather than a native addon. A compiled binding
@@ -70,7 +70,7 @@ export function namedParams<T extends object>(row: T): Record<string, SQLInputVa
   return { ...row } as unknown as Record<string, SQLInputValue>;
 }
 
-export type Role = 'admin' | 'operator' | 'viewer';
+export type Role = "admin" | "operator" | "viewer";
 
 export interface UserRow {
   id: string;
@@ -107,9 +107,9 @@ export function openDatabase(path: string): DatabaseSync {
   const db = new DatabaseSync(path);
 
   // WAL keeps the read-heavy API responsive while the audit log is written.
-  db.exec('PRAGMA journal_mode = WAL');
-  db.exec('PRAGMA foreign_keys = ON');
-  db.exec('PRAGMA busy_timeout = 5000');
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA foreign_keys = ON");
+  db.exec("PRAGMA busy_timeout = 5000");
 
   db.exec(SCHEMA);
   return db;
@@ -120,11 +120,10 @@ export function pruneExpired(
   db: DatabaseSync,
   now = Date.now(),
 ): { sessions: number; tokens: number } {
-  const sessions = Number(db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(now).changes);
+  const sessions = Number(db.prepare("DELETE FROM sessions WHERE expires_at < ?").run(now).changes);
   const tokens = Number(
-    db
-      .prepare('DELETE FROM api_tokens WHERE expires_at IS NOT NULL AND expires_at < ?')
-      .run(now).changes,
+    db.prepare("DELETE FROM api_tokens WHERE expires_at IS NOT NULL AND expires_at < ?").run(now)
+      .changes,
   );
   return { sessions, tokens };
 }

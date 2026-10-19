@@ -1,13 +1,13 @@
-import { hash, verify } from '@node-rs/argon2';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import type { DatabaseSync } from "node:sqlite";
+import { hash, verify } from "@node-rs/argon2";
 import {
-  createHash,
-  randomBytes,
-  randomUUID,
-  timingSafeEqual,
-} from 'node:crypto';
-
-import type { DatabaseSync } from 'node:sqlite';
-import { namedParams, type ApiTokenRow, type Role, type SessionRow, type UserRow } from '../db/index.js';
+  type ApiTokenRow,
+  namedParams,
+  type Role,
+  type SessionRow,
+  type UserRow,
+} from "../db/index.js";
 
 const ARGON2_OPTIONS = {
   memoryCost: 19_456,
@@ -29,7 +29,7 @@ export async function verifyPassword(digest: string, plain: string): Promise<boo
 }
 
 function sha256(value: string): string {
-  return createHash('sha256').update(value).digest('hex');
+  return createHash("sha256").update(value).digest("hex");
 }
 
 export interface AuthContext {
@@ -47,9 +47,9 @@ export async function createUser(
   role: Role,
 ): Promise<UserRow> {
   const normalized = email.trim().toLowerCase();
-  const existing = ctx.db.prepare('SELECT id FROM users WHERE email = ?').get(normalized);
+  const existing = ctx.db.prepare("SELECT id FROM users WHERE email = ?").get(normalized);
   if (existing) {
-    throw new Error('user already exists');
+    throw new Error("user already exists");
   }
 
   const user: UserRow = {
@@ -72,7 +72,7 @@ export async function createUser(
 }
 
 export function countUsers(db: DatabaseSync): number {
-  const row = db.prepare('SELECT COUNT(*) AS n FROM users').get() as { n: number };
+  const row = db.prepare("SELECT COUNT(*) AS n FROM users").get() as { n: number };
   return row.n;
 }
 
@@ -86,12 +86,12 @@ export async function authenticate(
   password: string,
 ): Promise<UserRow | null> {
   const row = ctx.db
-    .prepare('SELECT * FROM users WHERE email = ?')
+    .prepare("SELECT * FROM users WHERE email = ?")
     .get(email.trim().toLowerCase()) as UserRow | undefined;
 
   if (!row) {
     await verifyPassword(
-      '$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAA$AAAAAAAABBBBCCCCDDDDEEEEFFFF',
+      "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAA$AAAAAAAABBBBCCCCDDDDEEEEFFFF",
       password,
     );
     return null;
@@ -114,7 +114,7 @@ export function createSession(
 ): SessionRow {
   const now = Date.now();
   const session: SessionRow = {
-    id: randomBytes(32).toString('base64url'),
+    id: randomBytes(32).toString("base64url"),
     user_id: userId,
     created_at: now,
     expires_at: now + ctx.sessionTtlMs,
@@ -136,7 +136,7 @@ export function resolveSession(
   ctx: AuthContext,
   sessionId: string,
 ): { session: SessionRow; user: UserRow } | null {
-  const session = ctx.db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId) as
+  const session = ctx.db.prepare("SELECT * FROM sessions WHERE id = ?").get(sessionId) as
     | SessionRow
     | undefined;
 
@@ -144,7 +144,7 @@ export function resolveSession(
     return null;
   }
 
-  const user = ctx.db.prepare('SELECT * FROM users WHERE id = ?').get(session.user_id) as
+  const user = ctx.db.prepare("SELECT * FROM users WHERE id = ?").get(session.user_id) as
     | UserRow
     | undefined;
 
@@ -156,11 +156,11 @@ export function resolveSession(
 }
 
 export function destroySession(ctx: AuthContext, sessionId: string): void {
-  ctx.db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+  ctx.db.prepare("DELETE FROM sessions WHERE id = ?").run(sessionId);
 }
 
 export function destroyAllSessions(ctx: AuthContext, userId: string): void {
-  ctx.db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
+  ctx.db.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
 }
 
 /* ── API tokens (CLI) ───────────────────────────────────────────────────── */
@@ -177,8 +177,8 @@ export function createApiToken(
   userId: string,
   name: string,
 ): { token: string; row: ApiTokenRow } {
-  const lookupPrefix = randomBytes(6).toString('hex');
-  const secret = randomBytes(32).toString('base64url');
+  const lookupPrefix = randomBytes(6).toString("hex");
+  const secret = randomBytes(32).toString("base64url");
   const token = `ps_${lookupPrefix}_${secret}`;
 
   const row: ApiTokenRow = {
@@ -207,7 +207,7 @@ export function verifyApiToken(
   ctx: AuthContext,
   token: string,
 ): { token: ApiTokenRow; user: UserRow } | null {
-  if (!token.startsWith('ps_') || token.length <= 3 + TOKEN_PREFIX_LEN + 1) {
+  if (!token.startsWith("ps_") || token.length <= 3 + TOKEN_PREFIX_LEN + 1) {
     return null;
   }
 
@@ -215,13 +215,13 @@ export function verifyApiToken(
   // token on `_` would therefore mis-split most real tokens; only the prefix
   // segment is delimited, everything after it is the secret.
   const rest = token.slice(3);
-  const separator = rest.indexOf('_');
+  const separator = rest.indexOf("_");
   if (separator <= 0) {
     return null;
   }
 
   const prefix = `ps_${rest.slice(0, separator)}`;
-  const row = ctx.db.prepare('SELECT * FROM api_tokens WHERE prefix = ?').get(prefix) as
+  const row = ctx.db.prepare("SELECT * FROM api_tokens WHERE prefix = ?").get(prefix) as
     | ApiTokenRow
     | undefined;
 
@@ -229,8 +229,8 @@ export function verifyApiToken(
     return null;
   }
 
-  const expected = Buffer.from(row.token_hash, 'hex');
-  const actual = Buffer.from(sha256(token), 'hex');
+  const expected = Buffer.from(row.token_hash, "hex");
+  const actual = Buffer.from(sha256(token), "hex");
   if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
     return null;
   }
@@ -239,7 +239,7 @@ export function verifyApiToken(
     return null;
   }
 
-  const user = ctx.db.prepare('SELECT * FROM users WHERE id = ?').get(row.user_id) as
+  const user = ctx.db.prepare("SELECT * FROM users WHERE id = ?").get(row.user_id) as
     | UserRow
     | undefined;
 
@@ -247,7 +247,7 @@ export function verifyApiToken(
     return null;
   }
 
-  ctx.db.prepare('UPDATE api_tokens SET last_used_at = ? WHERE id = ?').run(Date.now(), row.id);
+  ctx.db.prepare("UPDATE api_tokens SET last_used_at = ? WHERE id = ?").run(Date.now(), row.id);
 
   return { token: row, user };
 }
@@ -256,13 +256,15 @@ export function listApiTokens(db: DatabaseSync, userId: string): ApiTokenRow[] {
   // node:sqlite types rows as `Record<string, SQLOutputValue>`; the row shapes
   // are declared alongside the schema in db/index.ts.
   return db
-    .prepare('SELECT * FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC')
+    .prepare("SELECT * FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC")
     .all(userId) as unknown as ApiTokenRow[];
 }
 
 export function revokeApiToken(db: DatabaseSync, userId: string, tokenId: string): boolean {
   const result = db
-    .prepare('UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL')
+    .prepare(
+      "UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
+    )
     .run(Date.now(), tokenId, userId);
   return result.changes > 0;
 }
@@ -270,11 +272,11 @@ export function revokeApiToken(db: DatabaseSync, userId: string, tokenId: string
 /* ── Audit ─────────────────────────────────────────────────────────────── */
 
 export interface AuditInput {
-  actorType: 'user' | 'token' | 'anonymous';
+  actorType: "user" | "token" | "anonymous";
   actorId: string | null;
   action: string;
   target?: string | null;
-  outcome: 'allowed' | 'denied';
+  outcome: "allowed" | "denied";
   ip?: string | null;
   detail?: string | null;
 }

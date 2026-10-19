@@ -1,6 +1,7 @@
 use crate::packet::ParsedPacket;
 use crate::router::Router;
 use anyhow::{Context, Result};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -10,6 +11,8 @@ use std::io::Write;
 pub struct TunManager {
     config: crate::config::TunConfig,
     dev: Arc<Mutex<Option<tun::Device>>>,
+    /// Set during shutdown so the blocking forwarding loop can return.
+    shutdown: Arc<AtomicBool>,
 }
 
 fn parse_ipv4(addr: &str) -> Result<(u8, u8, u8, u8)> {
@@ -27,7 +30,17 @@ impl TunManager {
         Self {
             config,
             dev: Arc::new(Mutex::new(None)),
+            shutdown: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Handle the forwarding loop can poll to learn it should stop.
+    pub fn shutdown_handle(&self) -> Arc<AtomicBool> {
+        self.shutdown.clone()
+    }
+
+    pub fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
     }
 
     pub async fn create(&self) -> Result<()> {
@@ -170,7 +183,14 @@ impl TunManager {
     /// Remove the fwmark routing rule and table.
     pub async fn cleanup_fwmark(table: u32, mark: u32) {
         let _ = tokio::process::Command::new("ip")
-            .args(["rule", "del", "fwmark", &mark.to_string(), "table", &table.to_string()])
+            .args([
+                "rule",
+                "del",
+                "fwmark",
+                &mark.to_string(),
+                "table",
+                &table.to_string(),
+            ])
             .output()
             .await;
         let _ = tokio::process::Command::new("ip")
@@ -219,24 +239,45 @@ pub async fn run_forwarding_loop(
     dev: tun::Device,
     router: Arc<Router>,
     mtu: usize,
+    shutdown: Arc<AtomicBool>,
 ) {
     info!("Starting TUN forwarding loop (MTU={mtu})");
     let handle = tokio::runtime::Handle::current();
 
-    tokio::task::spawn_blocking(move || {
-        use std::io::{Read, Write};
+    let result = tokio::task::spawn_blocking(move || {
+        use std::io::{ErrorKind, Read, Write};
         let mut buf = vec![0u8; mtu];
         let mut dev = dev;
         let mut packet_count = 0u64;
         let mut udp_cleanup_counter = 0u64;
 
+        // Non-blocking reads are what make this loop stoppable. A blocking
+        // `read` sits in the kernel until a packet arrives, so a blocking
+        // task could never return and the runtime could never be dropped —
+        // every restart ended in systemd SIGKILL after the 90s timeout.
+        if let Err(e) = dev.set_nonblock() {
+            warn!("TUN non-blocking mode unavailable ({e}); shutdown may hang");
+        }
+
         loop {
+            if shutdown.load(Ordering::SeqCst) {
+                info!("TUN forwarding loop stopping on shutdown signal");
+                break;
+            }
+
             let n = match dev.read(&mut buf) {
                 Ok(0) => {
                     warn!("TUN read returned 0 (EOF)");
                     break;
                 }
                 Ok(n) => n,
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    // Nothing queued. Yield the blocking thread so shutdown
+                    // stays responsive instead of spinning on the CPU.
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    udp_cleanup_counter += 1;
+                    continue;
+                }
                 Err(e) => {
                     warn!("TUN read error: {e}");
                     break;
@@ -277,7 +318,7 @@ pub async fn run_forwarding_loop(
                 }
             });
 
-            // Periodic cleanup of stale UDP flows (every 1000 packets)
+            // Periodic cleanup of stale UDP flows
             udp_cleanup_counter += 1;
             if udp_cleanup_counter.is_multiple_of(1000) {
                 handle.block_on(async {
@@ -285,18 +326,26 @@ pub async fn run_forwarding_loop(
                 });
             }
         }
-    })
-    .await
-    .expect("TUN loop panicked");
 
-    info!("TUN forwarding loop ended");
+        info!("TUN forwarding loop exited after {packet_count} packets");
+    })
+    .await;
+
+    if let Err(e) = result {
+        warn!("TUN forwarding task failed: {e}");
+    }
 }
 
 fn trace_packet(n: usize, packet_count: u64) {
     tracing::trace!("TUN read: {n} bytes (packet #{packet_count})");
 }
 
-fn handle_tcp(packet: &ParsedPacket, router: &Arc<Router>, dev: &mut tun::Device, handle: &tokio::runtime::Handle) {
+fn handle_tcp(
+    packet: &ParsedPacket,
+    router: &Arc<Router>,
+    dev: &mut tun::Device,
+    handle: &tokio::runtime::Handle,
+) {
     handle.block_on(async {
         if let Some(syn_ack) = router.handle_outgoing(packet).await {
             tracing::trace!("Writing SYN-ACK ({} bytes)", syn_ack.len());

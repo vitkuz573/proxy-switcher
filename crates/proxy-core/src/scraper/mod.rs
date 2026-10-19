@@ -20,7 +20,9 @@ enum ParseStrategy {
         col_proto: usize,
         col_anon: usize,
     },
-    PlainText { proto: ProxyProtocol },
+    PlainText {
+        proto: ProxyProtocol,
+    },
 }
 
 const BUILTIN_SOURCES: &[(&str, ParseStrategy)] = &[
@@ -115,15 +117,16 @@ impl Scraper {
         }
     }
 
-    async fn scrape_table(
-        &self,
-        url: &str,
-        strategy: ParseStrategy,
-    ) -> Result<Vec<ProxyInfo>> {
+    async fn scrape_table(&self, url: &str, strategy: ParseStrategy) -> Result<Vec<ProxyInfo>> {
         let (table_sel, col_ip, col_port, col_country, col_proto, col_anon) = match strategy {
-            ParseStrategy::Table { table, col_ip, col_port, col_country, col_proto, col_anon } => {
-                (table, col_ip, col_port, col_country, col_proto, col_anon)
-            }
+            ParseStrategy::Table {
+                table,
+                col_ip,
+                col_port,
+                col_country,
+                col_proto,
+                col_anon,
+            } => (table, col_ip, col_port, col_country, col_proto, col_anon),
             _ => return Ok(Vec::new()),
         };
 
@@ -134,8 +137,8 @@ impl Scraper {
             .map_err(|e| anyhow::anyhow!("Selector error: {e}"))?;
         let row_sel = scraper::Selector::parse("tbody tr")
             .map_err(|e| anyhow::anyhow!("Selector error: {e}"))?;
-        let td_sel = scraper::Selector::parse("td")
-            .map_err(|e| anyhow::anyhow!("Selector error: {e}"))?;
+        let td_sel =
+            scraper::Selector::parse("td").map_err(|e| anyhow::anyhow!("Selector error: {e}"))?;
 
         let mut proxies = Vec::new();
 
@@ -190,6 +193,8 @@ impl Scraper {
                     latency_ms: None,
                     country: cells.get(col_country).cloned(),
                     last_checked: None,
+                    last_success: None,
+                    consecutive_failures: 0,
                     score: 0.0,
                 });
             }
@@ -228,6 +233,8 @@ impl Scraper {
                     latency_ms: None,
                     country: None,
                     last_checked: None,
+                    last_success: None,
+                    consecutive_failures: 0,
                     score: 0.0,
                 });
             }

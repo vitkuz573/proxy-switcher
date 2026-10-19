@@ -15,16 +15,16 @@ reqwest.workspace = true
 url.workspace = true
 
 # TUN device
-tun = "0.7"
+tun = "0.8"
 
 # SOCKS
 tokio-socks = "0.5"
 
 # DNS
-hickory-resolver = "0.24"
+hickory-resolver = "0.26"
 
 # HTML parsing
-scraper = "0.21"
+scraper = "0.27"
 
 # Async
 tokio-stream = "0.1"
@@ -34,10 +34,13 @@ chrono = { version = "0.4", features = ["serde"] }
 rand.workspace = true
 
 # Database
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 
 # Socket options
 libc.workspace = true
+
+# Stable ids derived from URLs
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

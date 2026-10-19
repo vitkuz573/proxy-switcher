@@ -10,26 +10,25 @@
     "start": "node --enable-source-maps dist/server.js",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types 'test/**/*.test.ts'",
-    "sdk:generate": "openapi-typescript http://127.0.0.1:8080/openapi.json -o ../sdk/src/schema.d.ts"
+    "test": "node --import tsx --test test/**/*.test.ts"
   },
   "dependencies": {
-    "@fastify/cookie": "^11.0.2",
-    "@fastify/helmet": "^13.0.1",
-    "@fastify/rate-limit": "^10.2.2",
-    "@fastify/swagger": "^9.4.2",
-    "@fastify/swagger-ui": "^5.2.1",
-    "@node-rs/argon2": "^2.0.2",
-    "@sinclair/typebox": "^0.34.33",
+    "@fastify/cookie": "^11.1.3",
+    "@fastify/helmet": "^13.2.0",
+    "@fastify/rate-limit": "^11.2.1",
+    "@fastify/swagger": "^9.9.2",
+    "@fastify/swagger-ui": "^6.1.2",
+    "@node-rs/argon2": "^2.2.2",
+    "@proxy-switcher/sdk": "workspace:*",
+    "@sinclair/typebox": "^0.34.52",
     "ajv-formats": "^3.0.1",
-    "fastify": "^5.2.1",
-    "fastify-plugin": "^5.0.1",
-    "zod": "^3.24.1"
+    "fastify": "^5.12.7",
+    "fastify-plugin": "^6.0.1",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@types/node": "^22.10.7",
-    "openapi-typescript": "^7.6.1",
-    "tsx": "^4.19.2",
-    "typescript": "^5.7.3"
+    "@types/node": "^26",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
   }
 }

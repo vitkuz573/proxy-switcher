@@ -1,7 +1,7 @@
 import { Suspense } from "react";
 import { AppShell } from "@/components/app-shell";
-import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
+import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { Skeleton } from "@/components/ui/skeleton";
 
 /**
@@ -28,9 +28,10 @@ function PageSkeleton() {
     <div className="grid gap-4">
       <Skeleton className="h-8 w-48" />
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        {Array.from({ length: 4 }).map((_, index) => (
-          <Skeleton key={index} className="h-24 rounded-xl" />
-        ))}
+        <Skeleton className="h-24 rounded-xl" />
+        <Skeleton className="h-24 rounded-xl" />
+        <Skeleton className="h-24 rounded-xl" />
+        <Skeleton className="h-24 rounded-xl" />
       </div>
       <Skeleton className="h-64 rounded-xl" />
     </div>
