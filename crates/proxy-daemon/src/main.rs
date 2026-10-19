@@ -23,6 +23,80 @@ struct Args {
     config: String,
 }
 
+/// Load the country database, fetching it when it is missing or stale.
+///
+/// The fetch is the daemon's own traffic, so it bypasses the device the
+/// daemon itself created: asking a proxy for the proxy list would be asking
+/// the thing that is broken for a way to get the thing that is broken.
+async fn load_geo_database(
+    config: &proxy_core::config::GeoConfig,
+) -> Option<proxy_core::geo::GeoDatabase> {
+    if !config.enabled {
+        return None;
+    }
+
+    let fresh = std::fs::metadata(&config.database)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|modified| modified.elapsed().ok())
+        .map(|elapsed| elapsed.as_secs() < config.update_interval_secs)
+        .unwrap_or(false);
+
+    if !fresh {
+        if let Err(e) = download_geo_database(config).await {
+            warn!("could not refresh the country database: {e}");
+        }
+    }
+
+    match proxy_core::geo::GeoDatabase::load(&config.database) {
+        Ok(database) => Some(database),
+        Err(e) => {
+            warn!("could not read the country database: {e}");
+            None
+        }
+    }
+}
+
+/// Fetch the country database.
+async fn download_geo_database(config: &proxy_core::config::GeoConfig) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(config.download_timeout_secs))
+        .user_agent("proxy-switcher/1.0")
+        .build()?;
+
+    info!(url = %config.update_url, "fetching the country database");
+    let body = client
+        .get(&config.update_url)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+
+    if let Some(parent) = config.database.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Written beside the target and moved into place, so an interrupted
+    // download never leaves a half-written database behind.
+    let temporary = config.database.with_extension("download");
+    {
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(body.as_bytes())?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&temporary, &config.database)?;
+
+    info!(
+        bytes = body.len(),
+        file = %config.database.display(),
+        "country database fetched"
+    );
+    Ok(())
+}
+
 /// Read a file of sources.
 ///
 /// The file is TOML, so a source can carry a comment explaining why it is
@@ -132,6 +206,27 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let pool = Arc::new(ProxyPool::new().with_min_score(config.pool.min_score));
+
+    // The country database.
+    //
+    // The engine knows the address every verified proxy exits from, so the
+    // country is looked up rather than believed: the lists name a country in
+    // words, often the wrong words, and name none at all for most entries.
+    let geo_database = match load_geo_database(&config.geo).await {
+        Some(database) => {
+            info!(
+                ranges = database.len(),
+                file = %config.geo.database.display(),
+                "country database loaded"
+            );
+            Some(Arc::new(database))
+        }
+        None => {
+            warn!("no country database; the proxies will have no country");
+            None
+        }
+    };
+
     let db_path = if let Some(parent) = config.daemon.data_dir.parent() {
         tokio::fs::create_dir_all(parent).await.ok();
         Some(config.daemon.data_dir.join("proxy-switcher.db"))
@@ -153,6 +248,15 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(_) => info!("storage holds no proxies yet"),
             Err(e) => error!("Failed to restore pool: {e}"),
+        }
+    }
+
+    // The pool is geolocated after it is restored, for the proxies that were
+    // verified before the last restart.
+    if let Some(database) = geo_database.as_ref() {
+        let located = pool.geolocate(database).await;
+        if located > 0 {
+            info!(located, "proxies geolocated on start-up");
         }
     }
 
@@ -430,6 +534,7 @@ async fn main() -> anyhow::Result<()> {
                         let batch_schedule = schedule.clone();
                         let batch_path = db_path.clone();
                         let batch_state = scrape_state_clone.clone();
+                        let geo = geo_database.clone();
 
                         tokio::spawn(async move {
                             // Stream each result into the pool as it arrives, so
@@ -463,6 +568,11 @@ async fn main() -> anyhow::Result<()> {
                                 let counts = {
                                     let pc = pc.clone();
                                     let reasons = reasons.clone();
+                                    // The database is captured by reference:
+                                    // the closure runs once per result, and
+                                    // moving it in would take it out of the
+                                    // round.
+                                    let geo = geo.as_ref();
                                     hc.check_batch(&round, batch_progress.clone(), move |result| {
                                         let pc = pc.clone();
                                         let reasons = reasons.clone();
@@ -481,6 +591,13 @@ async fn main() -> anyhow::Result<()> {
                                                 &schedule,
                                             )
                                             .await;
+
+                                            // The exit address is known now,
+                                            // so the country can be worked
+                                            // out straight away.
+                                            if let Some(database) = geo {
+                                                pc.geolocate_one(&result.proxy_id, database).await;
+                                            }
                                         }
                                     })
                                     .await

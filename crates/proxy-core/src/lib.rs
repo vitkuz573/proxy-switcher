@@ -1,6 +1,7 @@
 pub mod config;
 pub mod dns;
 pub mod forwarder;
+pub mod geo;
 pub mod health;
 pub mod net;
 pub mod packet;

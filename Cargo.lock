@@ -1835,6 +1835,7 @@ dependencies = [
  "chrono",
  "clap",
  "proxy-core",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",

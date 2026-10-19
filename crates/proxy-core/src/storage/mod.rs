@@ -57,6 +57,7 @@ impl Storage {
             ("next_probe_at", "TEXT"),
             ("exit_ip", "TEXT"),
             ("password", "TEXT"),
+            ("country_reported", "TEXT"),
             ("supports_tunnel", "INTEGER NOT NULL DEFAULT 1"),
         ] {
             if !self.has_column("proxies", column)? {
@@ -83,8 +84,8 @@ impl Storage {
     pub fn save_proxies(&self, proxies: &[ProxyInfo]) -> Result<()> {
         let mut stmt = self.conn.prepare_cached(
             "INSERT OR REPLACE INTO proxies
-             (id, host, port, protocol, anonymity, latency_ms, country, score, last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, password, supports_tunnel)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+             (id, host, port, protocol, anonymity, latency_ms, country, country_reported, score, last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, password, supports_tunnel)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, $15, $16, $17)",
         )?;
 
         for p in proxies {
@@ -96,6 +97,7 @@ impl Storage {
                 format!("{:?}", p.anonymity),
                 p.latency_ms,
                 p.country,
+                p.country_reported,
                 p.score,
                 p.last_checked.map(|t| t.to_rfc3339()),
                 p.last_success.map(|t| t.to_rfc3339()),
@@ -122,8 +124,8 @@ impl Storage {
 
         let mut stmt = tx.prepare_cached(
             "INSERT INTO proxies
-             (id, host, port, protocol, anonymity, latency_ms, country, score, last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, password, supports_tunnel)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+             (id, host, port, protocol, anonymity, latency_ms, country, country_reported, score, last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, password, supports_tunnel)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, $15, $16, $17)",
         )?;
 
         for p in proxies {
@@ -135,6 +137,7 @@ impl Storage {
                 format!("{:?}", p.anonymity),
                 p.latency_ms,
                 p.country,
+                p.country_reported,
                 p.score,
                 p.last_checked.map(|t| t.to_rfc3339()),
                 p.last_success.map(|t| t.to_rfc3339()),
@@ -195,7 +198,7 @@ impl Storage {
     pub fn load_proxies(&self) -> Result<Vec<ProxyInfo>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, host, port, protocol, anonymity, latency_ms, country, score,
-                    last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, password, supports_tunnel
+                    last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, password, supports_tunnel, country_reported
              FROM proxies",
         )?;
 
@@ -208,6 +211,23 @@ impl Storage {
             let first_seen: Option<String> = row.get(11)?;
             let next_probe_at: Option<String> = row.get(12)?;
             let exit_ip: Option<String> = row.get(13)?;
+            let country: Option<String> = row.get(6)?;
+            let stored_reported: Option<String> = row.get(16)?;
+
+            // The two columns used to be one. A row written before the
+            // country was measured holds the list's wording in `country`, and
+            // that wording is not a code: it goes to the column that keeps
+            // what the list said, and the measured country is worked out
+            // again from the exit address.
+            let looks_like_a_code = country.as_deref().is_some_and(|value| {
+                value.len() == 2 && value.chars().all(|c| c.is_ascii_alphabetic())
+            });
+
+            let (country, country_reported) = if looks_like_a_code {
+                (country, stored_reported)
+            } else {
+                (None, country.or(stored_reported))
+            };
             let password: Option<String> = row.get(14)?;
 
             Ok(ProxyInfo {
@@ -217,7 +237,8 @@ impl Storage {
                 protocol: parse_enum(&protocol).unwrap_or(ProxyProtocol::Http),
                 anonymity: parse_enum(&anonymity).unwrap_or(Anonymity::Unknown),
                 latency_ms: latency.map(|v| v.max(0) as u64),
-                country: row.get(6)?,
+                country: country.map(Into::into),
+                country_reported: country_reported.map(Into::into),
                 last_checked: parse_time(last_checked.clone()),
                 last_success: parse_time(last_success),
                 // A row written before this column existed has no first-seen
@@ -269,6 +290,7 @@ mod tests {
             anonymity: Anonymity::Elite,
             latency_ms: Some(120),
             country: Some("NL".into()),
+            country_reported: None,
             last_checked: Some(chrono::Utc::now()),
             last_success,
             first_seen: chrono::Utc::now(),

@@ -34,6 +34,7 @@ fn main() {
             anonymity: Anonymity::Unknown,
             latency_ms: Some(500),
             country: None,
+            country_reported: None,
             last_checked: None,
             last_success: None,
             first_seen: chrono::Utc::now(),

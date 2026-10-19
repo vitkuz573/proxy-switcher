@@ -16,6 +16,7 @@ async fn main() {
         anonymity: Anonymity::Unknown,
         latency_ms: None,
         country: None,
+        country_reported: None,
         last_checked: None,
         last_success: None,
         first_seen: chrono::Utc::now(),

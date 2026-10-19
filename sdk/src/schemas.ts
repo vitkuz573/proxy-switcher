@@ -42,7 +42,15 @@ export const ProxyRecordSchema = Type.Object(
     protocol: ProxyProtocolSchema,
     anonymity: AnonymitySchema,
     latency_ms: Type.Union([Type.Integer(), Type.Null()]),
+    /**
+     * The country the traffic leaves from, as an ISO 3166-1 alpha-2 code.
+     *
+     * A code and not a name: the platform names it, in the reader's own
+     * language, and the flag is derived from it.
+     */
     country: Type.Union([Type.String(), Type.Null()]),
+    /** The country the list said the proxy was in. */
+    country_reported: Type.Union([Type.String(), Type.Null()]),
     last_checked: Type.Union([Type.String(), Type.Null()]),
     last_success: Type.Union([Type.String(), Type.Null()]),
     consecutive_failures: Type.Integer(),

@@ -202,6 +202,51 @@ impl ProxyPool {
         removed
     }
 
+    /// Work out the country of every proxy that has an exit address.
+    ///
+    /// The exit address is what the traffic leaves from, so the country
+    /// follows from it. The list's own claim is kept beside it.
+    pub async fn geolocate(&self, database: &crate::geo::GeoDatabase) -> usize {
+        let mut inner = self.inner.write().await;
+        let mut located = 0usize;
+
+        for proxy in inner.proxies.iter_mut() {
+            let Some(address) = proxy.exit_ip else {
+                continue;
+            };
+            let Some(code) = database.lookup(address) else {
+                continue;
+            };
+
+            if proxy.country.as_deref() != Some(code) {
+                located += 1;
+            }
+            proxy.country = Some(code.into());
+        }
+
+        located
+    }
+
+    /// The country of a proxy, worked out from its exit address.
+    ///
+    /// Used right after a probe, when the exit address is known but the
+    /// country is not.
+    pub async fn geolocate_one(
+        &self,
+        proxy_id: &str,
+        database: &crate::geo::GeoDatabase,
+    ) -> Option<String> {
+        let mut inner = self.inner.write().await;
+        let index = *inner.index.get(proxy_id)?;
+        let proxy = &mut inner.proxies[index];
+
+        let address = proxy.exit_ip?;
+        let code = database.lookup(address)?.to_string();
+
+        proxy.country = Some(code.clone().into());
+        Some(code)
+    }
+
     /// Remove every proxy condemned since the last sweep, in one pass.
     ///
     /// Eviction is deferred to here because removal rebuilds the id index: a
@@ -654,6 +699,7 @@ mod tests {
             anonymity: crate::proxy::Anonymity::Unknown,
             latency_ms: None,
             country: None,
+            country_reported: None,
             last_checked: None,
             last_success: None,
             first_seen: chrono::Utc::now(),
@@ -892,6 +938,7 @@ mod tests {
             anonymity: Anonymity::Elite,
             latency_ms: Some(90),
             country: None,
+            country_reported: None,
             last_checked: Some(now),
             last_success: confirmed.then_some(now),
             first_seen: chrono::Utc::now(),
@@ -933,6 +980,7 @@ mod tests {
             anonymity: Anonymity::Unknown,
             latency_ms: Some(500),
             country: None,
+            country_reported: None,
             last_checked: Some(now),
             last_success: Some(now),
             first_seen: chrono::Utc::now(),
@@ -969,6 +1017,7 @@ mod tests {
             anonymity: Anonymity::Unknown,
             latency_ms: None,
             country: None,
+            country_reported: None,
             last_checked: None,
             last_success: None,
             first_seen: chrono::Utc::now() - chrono::Duration::seconds(7200),

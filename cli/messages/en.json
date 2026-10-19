@@ -55,7 +55,7 @@
       "limit": "maximum rows",
       "sort": "score | latency | host",
       "title": "Proxies ({shown} of {total})",
-      "columns": ["", "ENDPOINT", "PROTO", "LATENCY", "SCORE"]
+      "columns": ["", "ENDPOINT", "PROTO", "LATENCY", "FLAG", "SCORE"]
     },
     "add": {
       "description": "Add a proxy manually",
@@ -136,5 +136,15 @@
     "description": "Description:",
     "version": "output the version number",
     "option": "display help for command"
+  },
+  "geo": {
+    "description": "Show where the pool is",
+    "title": "Geography",
+    "poolSize": "Pool size",
+    "working": "Working",
+    "exitAddresses": "Distinct exit addresses",
+    "countries": "Countries",
+    "byCountry": "By country ({count})",
+    "columns": ["FLAG", "COUNTRY", "PROXIES", "WORKING"]
   }
 }

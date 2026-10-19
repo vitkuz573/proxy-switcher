@@ -19,9 +19,8 @@ function load(locale: Locale): Catalogue {
     return cached;
   }
 
-  // The catalogues travel with the build, so they are looked for next to the
-  // compiled code first and beside the package second: the two layouts differ
-  // between running from the source tree and running from an install.
+  // The catalogues sit next to the compiled code, so they travel with the
+  // build rather than being looked up in the source tree.
   const here = dirname(fileURLToPath(import.meta.url));
   const candidates = [
     join(here, "..", "messages", `${locale}.json`),
@@ -50,27 +49,30 @@ export function resolveLocale(explicit?: string): Locale {
     return explicit as Locale;
   }
 
-  for (const name of ["LC_ALL", "LC_MESSAGES", "LANG"]) {
+  for (const name of ["LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"]) {
     const value = process.env[name];
     if (!value) {
       continue;
     }
 
-    const tag = value.split(".")[0]?.replace("_", "-").toLowerCase();
-    if (!tag) {
-      continue;
-    }
+    // LANGUAGE holds a colon-separated list of preferences.
+    for (const candidate of value.split(":")) {
+      const tag = candidate.split(".")[0]?.replace("_", "-").toLowerCase();
+      if (!tag) {
+        continue;
+      }
 
-    const exact = LOCALES.find((locale) => locale === tag);
-    if (exact) {
-      return exact;
-    }
+      const exact = LOCALES.find((locale) => locale === tag);
+      if (exact) {
+        return exact;
+      }
 
-    // A regional variant falls back to its language.
-    const language = tag.split("-")[0];
-    const base = LOCALES.find((locale) => locale === language);
-    if (base) {
-      return base;
+      // A regional variant falls back to its language.
+      const language = tag.split("-")[0];
+      const base = LOCALES.find((locale) => locale === language);
+      if (base) {
+        return base;
+      }
     }
   }
 
@@ -123,6 +125,51 @@ export function translator(locale: Locale) {
   };
 
   return t;
+}
+
+/**
+ * The flag of a country, as an emoji.
+ *
+ * A flag is two regional indicator symbols, one per letter of the code, so it
+ * is derived rather than looked up. Not every terminal has a font with the
+ * flag glyphs, so a terminal that cannot show them is given the letters of the
+ * code instead.
+ */
+export function countryFlag(code: string | null | undefined): string {
+  if (!code) {
+    return "";
+  }
+
+  const trimmed = code.trim().toUpperCase();
+  if (trimmed.length !== 2 || !/^[A-Z]{2}$/.test(trimmed)) {
+    return "";
+  }
+
+  if (!process.stdout.isTTY) {
+    return trimmed;
+  }
+
+  return String.fromCodePoint(...[...trimmed].map((letter) => 0x1f1e6 + letter.charCodeAt(0) - 65));
+}
+
+/**
+ * The name of a country, in the language of the reader.
+ *
+ * The platform carries the names of every country, in every language it
+ * knows, so there is no list here to fall out of step with the codes.
+ */
+export function countryName(code: string | null | undefined, locale = "en"): string {
+  if (!code) {
+    return "—";
+  }
+
+  try {
+    const display = new Intl.DisplayNames([locale], { type: "region" });
+    return display.of(code.toUpperCase()) ?? code.toUpperCase();
+  } catch {
+    // A code the platform does not know is still a code.
+    return code.toUpperCase();
+  }
 }
 
 export type Translate = ReturnType<typeof translator>;

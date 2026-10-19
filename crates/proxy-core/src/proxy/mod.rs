@@ -9,7 +9,20 @@ pub struct ProxyInfo {
     pub protocol: ProxyProtocol,
     pub anonymity: Anonymity,
     pub latency_ms: Option<u64>,
+    /// The country the traffic leaves from, as an ISO 3166-1 alpha-2 code.
+    ///
+    /// Measured from the exit address rather than taken from the list: the
+    /// lists name a country in words, often in the wrong words, and name none
+    /// at all for most of their entries. The address is known, so the country
+    /// is looked up rather than believed.
+    #[serde(default)]
     pub country: Option<Box<str>>,
+    /// The country the list said the proxy was in.
+    ///
+    /// Kept beside the measured one: a proxy that claims one country and
+    /// exits from another is worth seeing.
+    #[serde(default)]
+    pub country_reported: Option<Box<str>>,
     /// When the proxy was last probed, successfully or not.
     pub last_checked: Option<chrono::DateTime<chrono::Utc>>,
     /// When the proxy last actually worked. Drives staleness eviction.

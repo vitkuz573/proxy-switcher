@@ -27,6 +27,23 @@ sources_file = "/etc/proxy-switcher/sources.toml"
 # Sources given inline, in addition to the file.
 sources = []
 
+[geo]
+# Where the proxies are.
+#
+# The engine knows the address every verified proxy exits from, so the country
+# is worked out from that rather than taken from the list: the lists name a
+# country in words, often the wrong words, and name none at all for most of
+# their entries.
+enabled = true
+# The country database on disk. It is fetched when it is missing or stale.
+database = "/var/lib/proxy-switcher/geo-country.csv"
+# Where the database comes from.
+update_url = "https://raw.githubusercontent.com/sapics/ip-location-db/main/geolite2-country/geolite2-country-ipv4.csv"
+# How often the database is refreshed.
+update_interval_secs = 86400
+# How long the fetch may take.
+download_timeout_secs = 180
+
 [health]
 # The batch is I/O bound, so this is the main throughput lever.
 concurrency = 1000

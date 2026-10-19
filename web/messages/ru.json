@@ -24,7 +24,8 @@
     "errors": {
       "unreachable": "Движок недоступен",
       "generic": "Что-то пошло не так"
-    }
+    },
+    "unknownCountry": "Неизвестно"
   },
   "Nav": {
     "group": "Управление",

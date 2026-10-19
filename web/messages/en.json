@@ -24,7 +24,8 @@
     "errors": {
       "unreachable": "The engine is unreachable",
       "generic": "Something went wrong"
-    }
+    },
+    "unknownCountry": "Unknown"
   },
   "Nav": {
     "group": "Control",

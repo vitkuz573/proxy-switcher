@@ -443,7 +443,10 @@ async fn create_proxy(State(state): State<AppState>, Json(input): Json<AddProxyI
         protocol,
         anonymity: Anonymity::Unknown,
         latency_ms: None,
-        country: input.country.map(Into::into),
+        // What the operator says the proxy is in. The measured country comes
+        // from the exit address and replaces this once the proxy is verified.
+        country: None,
+        country_reported: input.country.map(Into::into),
         last_checked: None,
         last_success: None,
         first_seen: chrono::Utc::now(),

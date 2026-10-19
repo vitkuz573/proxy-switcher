@@ -4,7 +4,7 @@ import { Command, Help, type Option } from "commander";
 import { anonymousClient, CliError, cliCall, client } from "./client.js";
 import { configPath, loadConfig, saveConfig } from "./config.js";
 import { dim, green, heading, keyValue, red, table, truncate } from "./format.js";
-import { resolveLocale, translator } from "./i18n.js";
+import { countryFlag, countryName, resolveLocale, translator } from "./i18n.js";
 import { runCli } from "./run.js";
 
 /**
@@ -206,7 +206,8 @@ proxies
           p.id === summary.active_proxy?.id ? "*" : " ",
           truncate(`${p.host}:${p.port}`, 26),
           truncate(p.protocol, 7),
-          p.latency_ms === null ? "—" : `${p.latency_ms} ms`,
+          truncate(p.latency_ms === null ? "—" : `${p.latency_ms} ms`, 9),
+          countryFlag(p.country),
           p.score.toFixed(1),
         ]),
       );
@@ -360,6 +361,36 @@ scrape
     await runCli(async () => {
       await cliCall(() => client().createScrapeRun());
       console.log(`  ${green("✓")} ${t("scrape.run.done")}`);
+    });
+  });
+
+program
+  .command("geo")
+  .description("Show where the pool is")
+  .option("-n, --limit <count>", "how many countries to show", "20")
+  .action(async (options: { limit: string }) => {
+    await runCli(async () => {
+      const limit = Number(options.limit);
+      const statistics = await cliCall(() => client().getStatistics());
+
+      heading(t("geo.title"));
+      keyValue(t("geo.poolSize"), statistics.pool_size);
+      keyValue(t("geo.working"), statistics.working);
+      keyValue(t("geo.exitAddresses"), statistics.distinct_exit_addresses);
+      keyValue(t("geo.countries"), statistics.by_country.length);
+
+      const countries = statistics.by_country.slice(0, Number.isFinite(limit) ? limit : 20);
+
+      heading(t("geo.byCountry", { count: countries.length }));
+      table(
+        t.list("geo.columns"),
+        countries.map((entry) => [
+          countryFlag(entry.country),
+          truncate(countryName(entry.country, locale), 24),
+          String(entry.count),
+          String(entry.working),
+        ]),
+      );
     });
   });
 

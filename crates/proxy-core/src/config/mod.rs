@@ -8,6 +8,7 @@ pub struct Config {
     pub tun: TunConfig,
     pub scraper: ScraperConfig,
     pub health: HealthConfig,
+    pub geo: GeoConfig,
     pub pool: PoolConfig,
     /// Which traffic a proxy applies to.
     #[serde(default)]
@@ -143,6 +144,44 @@ fn default_unverified_ttl() -> u64 {
     3600
 }
 
+/// Where the engine finds out where a proxy is.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeoConfig {
+    /// Whether the engine geolocates the proxies it verifies.
+    pub enabled: bool,
+    /// The country database on disk.
+    pub database: std::path::PathBuf,
+    /// Where the database is fetched from when it is missing or stale.
+    pub update_url: String,
+    /// How often the database is refreshed.
+    pub update_interval_secs: u64,
+    /// Where the engine's own traffic for the database goes.
+    ///
+    /// The download is the engine's own traffic, so it bypasses the device the
+    /// engine itself created.
+    pub download_timeout_secs: u64,
+}
+
+impl Default for GeoConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            database: std::path::PathBuf::from("/var/lib/proxy-switcher/geo-country.csv"),
+            update_url: GEO_DATABASE_URL.to_string(),
+            update_interval_secs: 24 * 3600,
+            download_timeout_secs: 120,
+        }
+    }
+}
+
+/// The country database the engine uses.
+///
+/// The file is the country list published under the MaxMind GeoLite2 terms,
+/// distributed without a key. It is a list of address ranges and the country
+/// each belongs to, and it is a few megabytes.
+pub const GEO_DATABASE_URL: &str =
+    "https://raw.githubusercontent.com/sapics/ip-location-db/main/geolite2-country/geolite2-country-ipv4.csv";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolConfig {
     pub max_proxies: usize,
@@ -195,6 +234,7 @@ impl Default for Config {
                 unverified_ttl_secs: default_unverified_ttl(),
             },
             routing: RoutePolicy::default(),
+            geo: GeoConfig::default(),
             pool: PoolConfig {
                 max_proxies: 1000,
                 min_score: 0.0,

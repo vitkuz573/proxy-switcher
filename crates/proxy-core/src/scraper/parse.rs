@@ -279,7 +279,8 @@ fn build(
         protocol,
         anonymity: Anonymity::Unknown,
         latency_ms: None,
-        country: country.map(Into::into),
+        country: None,
+        country_reported: country.map(Into::into),
         last_checked: None,
         last_success: None,
         first_seen: chrono::Utc::now(),
@@ -444,7 +445,10 @@ mod tests {
         );
         assert_eq!(proxies.len(), 2);
         assert_eq!(proxies[0].protocol, ProxyProtocol::Socks5);
-        assert_eq!(proxies[0].country.as_deref(), Some("NL"));
+        // The list's claim is kept; the measured country comes from the exit
+        // address once the proxy is verified.
+        assert_eq!(proxies[0].country_reported.as_deref(), Some("NL"));
+        assert_eq!(proxies[0].country, None);
     }
 
     #[test]

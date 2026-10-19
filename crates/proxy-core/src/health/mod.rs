@@ -318,14 +318,19 @@ async fn check_one(
             let body = String::from_utf8_lossy(&buf);
             let view = parse_target_view(&body);
             let Some(exit_ip) = view.exit_ip else {
-                // The tunnel carried the request and the target answered, but
-                // it did not report an address. The proxy works; there is
-                // simply nothing to confirm the exit address with.
-                return HealthResult::working(
+                // The target always reports the address it sees. An answer
+                // without one did not come from the target: the proxy
+                // answered in its place.
+                //
+                // That is not a rare accident. A captive portal, an
+                // intercepting middlebox and a proxy that serves its own
+                // page all answer with a status of 200 and a page of their
+                // own, and every one of them was being counted as a working
+                // proxy. The address is what tells them apart, so an answer
+                // without one is the proxy failing.
+                return HealthResult::failed(
                     &proxy.id,
-                    start.elapsed().as_millis() as u64,
-                    None,
-                    true,
+                    "the proxy answered in place of the target",
                 );
             };
 
@@ -426,11 +431,16 @@ async fn check_plain_forwarding(
         .map(|(_, body)| body)
         .unwrap_or_default();
 
-    let exit_ip = extract_exit_ip(body);
+    let Some(exit_ip) = extract_exit_ip(body) else {
+        // The same rule as for a tunnel: an answer without an address did not
+        // come from the target.
+        return Err("the proxy answered in place of the target".to_string());
+    };
+
     Ok(HealthResult::working(
         &proxy.id,
         start.elapsed().as_millis() as u64,
-        exit_ip,
+        Some(exit_ip),
         false,
     ))
 }
@@ -835,6 +845,38 @@ pub struct CheckCounts {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// The body of an answer that did not come from the target.
+    ///
+    /// A captive portal, an intercepting middlebox and a proxy that serves its
+    /// own page all answer with a status of 200 and a page of their own.
+    const INTERCEPTED: &str =
+        "<!DOCTYPE html><html lang=\"ru\"><head><title>Blocked</title></head></html>";
+
+    #[test]
+    fn an_answer_without_an_address_is_not_the_target() {
+        // The target always reports the address it sees.
+        assert!(extract_exit_ip("135.136.35.62\n").is_some());
+        assert!(extract_exit_ip(r#"{"origin":"135.136.35.62"}"#).is_some());
+
+        // A page of the proxy's own is not an address.
+        assert!(extract_exit_ip(INTERCEPTED).is_none());
+    }
+
+    #[test]
+    fn a_json_answer_carries_the_address_and_the_headers() {
+        let view = parse_target_view(
+            r#"{"origin":"135.136.35.62","headers":{"X-Forwarded-For":["135.136.35.62"]}}"#,
+        );
+
+        assert_eq!(view.exit_ip, Some("135.136.35.62".parse().unwrap()));
+        assert!(view
+            .headers
+            .iter()
+            .any(|(name, value)| name == "x-forwarded-for" && value.contains("135.136.35.62")));
+    }
+
     use super::parse_target;
 
     #[test]

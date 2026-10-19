@@ -14,6 +14,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { countryFlag, useCountryName } from "@/components/country";
 import {
   type ChartConfig,
   ChartContainer,
@@ -77,6 +78,7 @@ function compact(value: number): string {
 export function PoolStatisticsCharts({ statistics }: { statistics: PoolStatistics }) {
   const t = useTranslations("Statistics.charts");
   const format = useFormatter();
+  const countryName = useCountryName();
 
   const history = statistics.history.map((sample) => ({
     ...sample,
@@ -111,7 +113,9 @@ export function PoolStatisticsCharts({ statistics }: { statistics: PoolStatistic
   }));
 
   const countries = statistics.by_country.slice(0, 12).map((entry) => ({
-    country: entry.country,
+    // The flag is derived from the code and the name comes from the
+    // platform, so neither needs a table of its own.
+    country: `${countryFlag(entry.country)} ${countryName(entry.country)}`.trim(),
     count: entry.count,
     working: entry.working,
   }));

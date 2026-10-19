@@ -6,6 +6,7 @@ import { useTranslations } from "next-intl";
 import { useEffect, useMemo, useState, useTransition } from "react";
 import { toast } from "sonner";
 import { AddProxyDialog } from "@/components/add-proxy-dialog";
+import { countryFlag, useCountryName } from "@/components/country";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -50,6 +51,7 @@ export function ProxiesTable({
   canWrite: boolean;
 }) {
   const t = useTranslations("Proxies");
+  const countryName = useCountryName();
   const router = useRouter();
   const [proxies, setProxies] = useState(initial);
   const [query, setQuery] = useState("");
@@ -188,7 +190,10 @@ export function ProxiesTable({
                   <TableCell className="font-mono text-xs">
                     {proxy.host}:{proxy.port}
                     {proxy.country ? (
-                      <span className="ml-2 font-sans text-muted-foreground">{proxy.country}</span>
+                      <span className="ml-2 font-sans text-muted-foreground">
+                        <span aria-hidden>{countryFlag(proxy.country)}</span>{" "}
+                        {countryName(proxy.country)}
+                      </span>
                     ) : null}
                     {proxy.id === activeId ? <Badge className="ml-2">active</Badge> : null}
                   </TableCell>
