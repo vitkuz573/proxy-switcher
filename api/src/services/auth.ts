@@ -253,10 +253,15 @@ export function verifyApiToken(
 }
 
 export function listApiTokens(db: DatabaseSync, userId: string): ApiTokenRow[] {
+  // Revoked tokens are excluded: they are dead credentials, and listing them
+  // beside live ones makes the two indistinguishable — an operator checking
+  // what is still in use would see a revoked token and assume it works.
   // node:sqlite types rows as `Record<string, SQLOutputValue>`; the row shapes
   // are declared alongside the schema in db/index.ts.
   return db
-    .prepare("SELECT * FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC")
+    .prepare(
+      "SELECT * FROM api_tokens WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC",
+    )
     .all(userId) as unknown as ApiTokenRow[];
 }
 

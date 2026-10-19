@@ -301,6 +301,47 @@ describe("role gates", () => {
   });
 });
 
+describe("tokens", () => {
+  test("a revoked token disappears from the listing", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/tokens",
+      headers: auth(),
+      payload: { name: "to-be-revoked" },
+    });
+    assert.equal(created.statusCode, 201);
+    const { token, api_token: record } = created.json();
+
+    const before = await app.inject({ method: "GET", url: "/api/v1/tokens", headers: auth() });
+    assert.ok(
+      before.json().some((t: { id: string }) => t.id === record.id),
+      "a fresh token must be listed",
+    );
+
+    const revoked = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/tokens/${record.id}`,
+      headers: auth(),
+    });
+    assert.equal(revoked.statusCode, 204, revoked.body);
+
+    // The dead credential must not be listed as if it still worked.
+    const after = await app.inject({ method: "GET", url: "/api/v1/tokens", headers: auth() });
+    assert.ok(
+      !after.json().some((t: { id: string }) => t.id === record.id),
+      "a revoked token must not be listed",
+    );
+
+    // And it must not authenticate.
+    const used = await app.inject({
+      method: "GET",
+      url: "/api/v1/summary",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    assert.equal(used.statusCode, 401);
+  });
+});
+
 describe("sessions", () => {
   test("creating a session sets an HttpOnly cookie and returns the user", async () => {
     const response = await app.inject({

@@ -3,10 +3,7 @@
     "servers": {
       "shadcn": {
         "type": "local",
-        "command": [
-          "shadcn",
-          "mcp"
-        ]
+        "command": ["shadcn", "mcp"]
       }
     }
   }
