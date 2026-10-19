@@ -1,3 +1,4 @@
+use crate::proxy::connector::base::Carriage;
 use crate::proxy::ProxyInfo;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -83,6 +84,10 @@ pub struct HealthResult {
     pub verdict: Verdict,
     pub latency_ms: u64,
     pub error: Option<String>,
+    /// Whether the proxy carried the request through a tunnel.
+    pub tunneled: bool,
+    /// How much the proxy revealed about the client.
+    pub anonymity: Option<crate::proxy::Anonymity>,
     /// The address the target reported for the request.
     ///
     /// This is the address the traffic actually left from. Comparing it with
@@ -92,13 +97,20 @@ pub struct HealthResult {
 }
 
 impl HealthResult {
-    pub fn working(proxy_id: &str, latency_ms: u64, exit_ip: Option<std::net::IpAddr>) -> Self {
+    pub fn working(
+        proxy_id: &str,
+        latency_ms: u64,
+        exit_ip: Option<std::net::IpAddr>,
+        tunneled: bool,
+    ) -> Self {
         Self {
             proxy_id: proxy_id.to_string(),
             verdict: Verdict::Working,
             latency_ms,
             error: None,
             exit_ip,
+            tunneled,
+            anonymity: None,
         }
     }
 
@@ -109,6 +121,8 @@ impl HealthResult {
             latency_ms: 0,
             error: Some(reason.into()),
             exit_ip: None,
+            tunneled: false,
+            anonymity: None,
         }
     }
 
@@ -119,6 +133,8 @@ impl HealthResult {
             latency_ms: 0,
             error: Some(reason.into()),
             exit_ip: None,
+            tunneled: false,
+            anonymity: None,
         }
     }
 
@@ -195,8 +211,26 @@ async fn check_one(
     .await
     {
         Ok(Ok(conn)) => conn,
-        // Refused, reset, DNS failure: the endpoint is not usable.
-        Ok(Err(e)) => return HealthResult::failed(&proxy.id, format!("connect error: {e}")),
+        // Refused, reset, DNS failure: the endpoint is not usable as a tunnel.
+        //
+        // It may still be a plain-forwarding proxy, which is no use for a
+        // tunnel but plenty of use for HTTP. A large part of the public proxy
+        // population answers CONNECT with an error and then serves ordinary
+        // requests perfectly well; calling those proxies broken throws away
+        // working entries.
+        Ok(Err(tunnel_error)) => {
+            if !Carriage::is_plain_http(port) {
+                return HealthResult::failed(&proxy.id, format!("connect error: {tunnel_error}"));
+            }
+
+            return match check_plain_forwarding(proxy, host, path, timeout, mark, start).await {
+                Ok(result) => result,
+                Err(reason) => HealthResult::failed(
+                    &proxy.id,
+                    format!("no tunnel ({tunnel_error}) and no plain forwarding: {reason}"),
+                ),
+            };
+        }
         // Nothing came back in time — the proxy's state is unknown.
         Err(_) => return HealthResult::inconclusive(&proxy.id, "connect timeout"),
     };
@@ -271,11 +305,17 @@ async fn check_one(
             // proof that the request really travelled through the proxy and
             // the address the traffic will leave from.
             let body = String::from_utf8_lossy(&buf);
-            let Some(exit_ip) = extract_exit_ip(&body) else {
+            let view = parse_target_view(&body);
+            let Some(exit_ip) = view.exit_ip else {
                 // The tunnel carried the request and the target answered, but
                 // it did not report an address. The proxy works; there is
                 // simply nothing to confirm the exit address with.
-                return HealthResult::working(&proxy.id, start.elapsed().as_millis() as u64, None);
+                return HealthResult::working(
+                    &proxy.id,
+                    start.elapsed().as_millis() as u64,
+                    None,
+                    true,
+                );
             };
 
             // The same address the engine gets means the request never left
@@ -284,10 +324,185 @@ async fn check_one(
                 return HealthResult::failed(&proxy.id, "the endpoint did not proxy the request");
             }
 
-            HealthResult::working(&proxy.id, start.elapsed().as_millis() as u64, Some(exit_ip))
+            HealthResult {
+                proxy_id: proxy.id.clone(),
+                verdict: Verdict::Working,
+                latency_ms: start.elapsed().as_millis() as u64,
+                error: None,
+                exit_ip: Some(exit_ip),
+                tunneled: true,
+                anonymity: classify_anonymity(&view, own_exit_ip),
+            }
         }
         Ok(Err(e)) => HealthResult::failed(&proxy.id, format!("read error: {e}")),
         Err(_) => HealthResult::inconclusive(&proxy.id, "read timeout"),
+    }
+}
+
+/// Probe a proxy that does not tunnel: send an ordinary request with an
+/// absolute URI and read the response.
+///
+/// The response is the target's, relayed by the proxy, and the address in it
+/// is the proxy's own — the same proof a tunnel gives, reached the other way.
+async fn check_plain_forwarding(
+    proxy: &ProxyInfo,
+    host: &str,
+    path: &str,
+    timeout: Duration,
+    mark: Option<u32>,
+    start: Instant,
+) -> Result<HealthResult, String> {
+    let mut stream = crate::net::connect_tcp(
+        std::net::SocketAddr::new(
+            proxy
+                .host
+                .parse::<std::net::IpAddr>()
+                .map_err(|_| "the proxy address is not numeric".to_string())?,
+            proxy.port,
+        ),
+        mark,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    crate::proxy::connector::http_plain::HttpPlainConnector::write_absolute_request(
+        &mut stream,
+        path,
+        host,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let response = tokio::time::timeout(
+        timeout,
+        crate::proxy::connector::http_plain::read_response(&mut stream),
+    )
+    .await
+    .map_err(|_| "read timeout".to_string())?
+    .map_err(|e| e.to_string())?;
+
+    let status = response
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if !status.starts_with("HTTP/1.") {
+        return Err(format!("not an HTTP response: {status}"));
+    }
+
+    let code = status
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse::<u16>().ok())
+        .unwrap_or(0);
+
+    if code == 407 {
+        return Err("the proxy requires authentication".to_string());
+    }
+    if !(200..300).contains(&code) {
+        return Err(format!("the target answered {status}"));
+    }
+
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or_default();
+
+    let exit_ip = extract_exit_ip(body);
+    Ok(HealthResult::working(
+        &proxy.id,
+        start.elapsed().as_millis() as u64,
+        exit_ip,
+        false,
+    ))
+}
+
+/// What the target saw of the request.
+struct TargetView {
+    /// The address the request came from.
+    exit_ip: Option<std::net::IpAddr>,
+    /// Headers the target received.
+    headers: Vec<(String, String)>,
+}
+
+/// Parse what the target reported.
+///
+/// The echo services answer either with a bare address or with a small JSON
+/// document. The JSON form also carries the request headers, which is what
+/// says whether the proxy leaked the client's address.
+fn parse_target_view(body: &str) -> TargetView {
+    let mut headers = Vec::new();
+
+    // A JSON object of headers: "Key": ["value"] or "Key": "value".
+    if body.contains("\"headers\"") {
+        let mut rest = body;
+        while let Some(key_start) = rest.find('"') {
+            let after = &rest[key_start + 1..];
+            let Some(key_end) = after.find('"') else {
+                break;
+            };
+            let key = &after[..key_end];
+            rest = &after[key_end + 1..];
+
+            let Some(colon) = rest.find(':') else {
+                continue;
+            };
+            let value_part = rest[colon + 1..].trim_start();
+            let value = value_part
+                .trim_start_matches('[')
+                .split('"')
+                .nth(1)
+                .unwrap_or_default()
+                .to_string();
+
+            if !key.is_empty() && !value.is_empty() {
+                headers.push((key.to_ascii_lowercase(), value));
+            }
+        }
+    }
+
+    TargetView {
+        exit_ip: extract_exit_ip(body),
+        headers,
+    }
+}
+
+/// Classify what the proxy revealed about the client.
+///
+/// - transparent: the proxy passed the client's own address on, so the
+///   destination can see who it is really talking to.
+/// - anonymous: the proxy identified itself but did not leak the address.
+/// - elite: the proxy left no trace at all.
+fn classify_anonymity(
+    view: &TargetView,
+    own_exit_ip: Option<std::net::IpAddr>,
+) -> Option<crate::proxy::Anonymity> {
+    use crate::proxy::Anonymity;
+
+    let forwarded = view
+        .headers
+        .iter()
+        .find(|(name, _)| name == "x-forwarded-for")
+        .map(|(_, value)| value.clone());
+
+    if let (Some(forwarded), Some(own)) = (&forwarded, own_exit_ip) {
+        if forwarded.contains(&own.to_string()) {
+            return Some(Anonymity::Transparent);
+        }
+    }
+
+    let identifies_itself = view.headers.iter().any(|(name, _)| {
+        matches!(
+            name.as_str(),
+            "via" | "proxy-connection" | "x-forwarded-for" | "x-forwarded-proto" | "forwarded"
+        )
+    });
+
+    if identifies_itself {
+        Some(Anonymity::Anonymous)
+    } else {
+        Some(Anonymity::Elite)
     }
 }
 

@@ -10,6 +10,7 @@ use crate::proxy::ProxyProtocol;
 
 pub mod base;
 pub mod http;
+pub mod http_plain;
 pub mod https;
 pub mod socks4;
 pub mod socks5;

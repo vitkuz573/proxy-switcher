@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
         Config::default()
     };
 
-    let pool = Arc::new(ProxyPool::new());
+    let pool = Arc::new(ProxyPool::new().with_min_score(config.pool.min_score));
     let db_path = if let Some(parent) = config.daemon.data_dir.parent() {
         tokio::fs::create_dir_all(parent).await.ok();
         Some(config.daemon.data_dir.join("proxy-switcher.db"))
@@ -144,7 +144,20 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // Shared state for API
-    let sources = Arc::new(RwLock::new(config.scraper.sources.clone()));
+    //
+    // The stored list wins over the configuration file: a source added
+    // through the API is a deliberate change, and losing it on the next
+    // restart would make the API a lie.
+    let sources = Arc::new(RwLock::new(match db_path.as_ref() {
+        Some(path) => match Storage::open(path).and_then(|s| s.load_sources()) {
+            Ok(stored) if !stored.is_empty() => {
+                info!(count = stored.len(), "scrape sources restored from storage");
+                stored
+            }
+            _ => config.scraper.sources.clone(),
+        },
+        None => config.scraper.sources.clone(),
+    }));
     let scraper = Arc::new(Scraper::new(sources.clone()));
     // Shared health-check bookkeeping: a live progress counter and a guard so
     // only one batch runs at a time.
@@ -174,6 +187,7 @@ async fn main() -> anyhow::Result<()> {
         check_progress: check_progress.clone(),
         check_in_flight: check_in_flight.clone(),
         eviction_policy,
+        db_path: db_path.clone(),
         route_policy: route_policy.clone(),
         bypass_mark,
         default_route: config.tun.default_route,
@@ -403,6 +417,45 @@ async fn main() -> anyhow::Result<()> {
 
                 let wait = until_probe.min(until_scrape).max(1).min(scrape_interval);
                 tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+            }
+        });
+    }
+
+    // Automatic rotation.
+    //
+    // The setting existed and did nothing: a proxy left selected stays
+    // selected until it dies, and a public proxy that works now often stops
+    // working within the hour. Rotating on a schedule keeps a fresh proxy in
+    // front without anyone having to intervene.
+    if config.pool.auto_rotate && config.pool.rotate_interval_secs > 0 {
+        let pool = pool.clone();
+        let interval = config.pool.rotate_interval_secs;
+        let min_score = config.pool.min_score;
+
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+
+                let candidates = pool.tunnel_capable(min_score).await;
+                if candidates.is_empty() {
+                    warn!("Nothing to rotate to");
+                    continue;
+                }
+
+                // Move to a different proxy than the current one, so the
+                // rotation actually rotates.
+                let current = pool.active().await.map(|p| p.id);
+                let next = candidates
+                    .iter()
+                    .find(|p| Some(&p.id) != current.as_ref())
+                    .or_else(|| candidates.first());
+
+                if let Some(next) = next {
+                    match pool.set_active(&next.id).await {
+                        Some(selected) => info!(id = %selected.id, "rotated"),
+                        None => warn!("could not select {}", next.id),
+                    }
+                }
             }
         });
     }

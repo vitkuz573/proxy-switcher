@@ -59,6 +59,7 @@ class FakeEngine {
         consecutive_failures: 0,
         score: 0,
         exit_ip: null,
+        supports_tunnel: true,
       };
       this.proxies.set(record.id, record);
       return json(record, 201);
@@ -98,6 +99,7 @@ class FakeEngine {
       consecutive_failures: 0,
       score: 0,
       exit_ip: null,
+      supports_tunnel: true,
     });
     return id;
   }

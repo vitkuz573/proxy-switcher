@@ -100,6 +100,10 @@ fn default_failure_threshold() -> u32 {
 
 fn default_probe_targets() -> Vec<String> {
     vec![
+        // Reports both the source address and the request headers, which is
+        // what says whether the proxy leaked the client's address.
+        "http://httpbin.org/anything".to_string(),
+        // Faster fallbacks that report only the address.
         "http://icanhazip.com".to_string(),
         "http://api.ipify.org".to_string(),
         "http://ifconfig.me/ip".to_string(),

@@ -84,6 +84,8 @@ pub struct AppState {
     pub check_in_flight: Arc<std::sync::atomic::AtomicBool>,
     /// When a proxy may be evicted, shared by every path that applies results.
     pub eviction_policy: EvictionPolicy,
+    /// Where the source list is stored, so a change survives a restart.
+    pub db_path: Option<std::path::PathBuf>,
     /// Which traffic a proxy applies to.
     pub route_policy: RoutePolicy,
     /// The firewall mark the daemon's own traffic carries.
@@ -374,6 +376,7 @@ async fn create_proxy(State(state): State<AppState>, Json(input): Json<AddProxyI
         first_seen: chrono::Utc::now(),
         next_probe_at: chrono::Utc::now(),
         exit_ip: None,
+        supports_tunnel: true,
         consecutive_failures: 0,
         score: 0.0,
     };
@@ -478,6 +481,28 @@ async fn list_sources(State(state): State<AppState>) -> Json<Vec<Source>> {
     )
 }
 
+/// Write the source list through to storage.
+///
+/// The list was in memory only, so a source added through the API was gone
+/// after the next restart. The connection is opened for the write and dropped
+/// again, because it is not `Sync`.
+async fn persist_sources(state: &AppState, sources: Vec<String>) {
+    let Some(path) = state.db_path.clone() else {
+        return;
+    };
+
+    let result = tokio::task::spawn_blocking(move || {
+        proxy_core::storage::Storage::open(&path)?.save_sources(&sources)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => error!("Failed to persist the scrape sources: {e}"),
+        Err(e) => error!("Persist task failed: {e}"),
+    }
+}
+
 async fn create_source(
     State(state): State<AppState>,
     Json(input): Json<AddSourceInput>,
@@ -494,8 +519,10 @@ async fn create_source(
         return ApiError::conflict("That source is already configured").into_response();
     }
     sources.push(url.clone());
+    let snapshot = sources.clone();
 
     drop(sources);
+    persist_sources(&state, snapshot).await;
     info!(%id, "scrape source added");
 
     let location = format!("/api/v1/sources/{id}");
@@ -518,6 +545,10 @@ async fn delete_source(
     if sources.len() == before {
         return Err(ApiError::not_found(format!("No source with id {id}")));
     }
+
+    let snapshot = sources.clone();
+    drop(sources);
+    persist_sources(&state, snapshot).await;
 
     info!(%id, "scrape source removed");
     Ok(StatusCode::NO_CONTENT)

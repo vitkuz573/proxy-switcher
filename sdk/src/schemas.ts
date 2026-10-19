@@ -48,6 +48,8 @@ export const ProxyRecordSchema = Type.Object(
     score: Type.Number(),
     /** The address traffic left from, as the target reported it. */
     exit_ip: Type.Union([Type.String(), Type.Null()]),
+    /** Whether the proxy can carry a tunnel, or only plain HTTP. */
+    supports_tunnel: Type.Boolean(),
   },
   { $id: "Proxy" },
 );

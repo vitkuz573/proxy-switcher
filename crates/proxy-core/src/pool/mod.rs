@@ -25,6 +25,11 @@ impl Default for EvictionPolicy {
 
 #[derive(Default)]
 pub struct ProxyPool {
+    /// A proxy confirmed working but slower than this is not selected.
+    ///
+    /// The score is derived from the measured latency, so the floor is a
+    /// statement about how slow is too slow rather than an arbitrary number.
+    pub min_score: f64,
     inner: Arc<RwLock<PoolInner>>,
 }
 
@@ -100,6 +105,12 @@ pub struct BatchOutcome {
 impl ProxyPool {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the score floor.
+    pub fn with_min_score(mut self, min_score: f64) -> Self {
+        self.min_score = min_score;
+        self
     }
 
     /// Fold freshly scraped proxies into the pool.
@@ -275,6 +286,28 @@ impl ProxyPool {
             .collect()
     }
 
+    /// The proxies that can carry a tunnel.
+    ///
+    /// A proxy that only forwards plain HTTP works, and is kept, but it cannot
+    /// carry an arbitrary TCP stream, so it is not a candidate for routing.
+    ///
+    /// `min_score` is a floor on usefulness: a proxy that is confirmed
+    /// working but slower than the floor is not worth selecting.
+    pub async fn tunnel_capable(&self, min_score: f64) -> Vec<ProxyInfo> {
+        let inner = self.inner.read().await;
+        inner
+            .proxies
+            .iter()
+            .filter(|p| {
+                p.consecutive_failures == 0
+                    && p.last_success.is_some()
+                    && p.supports_tunnel
+                    && p.score >= min_score
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Fold probe results back into the pool.
     ///
     /// A failed probe increments a streak; the proxy is evicted only once it
@@ -313,6 +346,15 @@ impl ProxyPool {
                 // one exit address, and seeing it makes that visible.
                 if let Some(exit_ip) = result.exit_ip {
                     proxy.exit_ip = Some(exit_ip.to_string());
+                }
+                // Whether the proxy can tunnel is a measured fact, not an
+                // assumption: a proxy that only forwards plain HTTP is no use
+                // for an arbitrary TCP stream.
+                proxy.supports_tunnel = result.tunneled;
+                // What the proxy revealed about the client, measured the same
+                // way: the headers the target received.
+                if let Some(anonymity) = result.anonymity {
+                    proxy.anonymity = anonymity;
                 }
                 // A working proxy is re-checked on the normal interval.
                 proxy.next_probe_at =
@@ -461,7 +503,23 @@ impl ProxyPool {
 
     /// Proxies whose most recent probe succeeded. This is the number the
     /// dashboard reports as "healthy".
+    /// The proxies that are confirmed working and can carry a tunnel.
     pub async fn healthy_count(&self) -> usize {
+        let inner = self.inner.read().await;
+        inner
+            .proxies
+            .iter()
+            .filter(|p| {
+                p.last_success.is_some() && p.consecutive_failures == 0 && p.supports_tunnel
+            })
+            .count()
+    }
+
+    /// The proxies confirmed working, whatever their score.
+    ///
+    /// The count an operator wants to see: a proxy that works but is slow is
+    /// still a working proxy, it is just not worth selecting.
+    pub async fn working_count(&self) -> usize {
         let inner = self.inner.read().await;
         inner
             .proxies
@@ -476,7 +534,12 @@ impl ProxyPool {
         inner
             .proxies
             .iter()
-            .filter(|p| p.last_success.is_some() && p.consecutive_failures == 0)
+            .filter(|p| {
+                p.last_success.is_some()
+                    && p.consecutive_failures == 0
+                    && p.supports_tunnel
+                    && p.score >= self.min_score
+            })
             .max_by(|a, b| {
                 a.score
                     .partial_cmp(&b.score)
@@ -565,6 +628,7 @@ mod tests {
             first_seen: chrono::Utc::now(),
             next_probe_at: chrono::Utc::now(),
             exit_ip: None,
+            supports_tunnel: true,
             consecutive_failures: 0,
             score: 0.0,
         }
@@ -572,7 +636,7 @@ mod tests {
 
     fn result(id: &str, alive: bool, latency: u64) -> HealthResult {
         if alive {
-            HealthResult::working(id, latency, None)
+            HealthResult::working(id, latency, None, true)
         } else {
             HealthResult::failed(id, "refused")
         }
@@ -801,6 +865,7 @@ mod tests {
             first_seen: chrono::Utc::now(),
             next_probe_at: chrono::Utc::now(),
             exit_ip: None,
+            supports_tunnel: true,
             consecutive_failures: 0,
             score: 0.9,
         };
@@ -840,6 +905,7 @@ mod tests {
             first_seen: chrono::Utc::now(),
             next_probe_at: chrono::Utc::now(),
             exit_ip: None,
+            supports_tunnel: true,
             consecutive_failures: 0,
             score: 0.5,
         };
@@ -874,6 +940,7 @@ mod tests {
             first_seen: chrono::Utc::now() - chrono::Duration::seconds(7200),
             next_probe_at: chrono::Utc::now(),
             exit_ip: None,
+            supports_tunnel: true,
             consecutive_failures: 0,
             score: 0.0,
         };
@@ -888,6 +955,8 @@ mod tests {
             verdict: Verdict::Failed,
             latency_ms: 0,
             exit_ip: None,
+            tunneled: true,
+            anonymity: None,
             error: None,
         };
 
@@ -912,6 +981,8 @@ mod tests {
             verdict: Verdict::Failed,
             latency_ms: 0,
             exit_ip: None,
+            tunneled: true,
+            anonymity: None,
             error: None,
         };
         assert!(
@@ -1011,6 +1082,8 @@ mod tests {
             verdict: Verdict::Inconclusive,
             latency_ms: 0,
             exit_ip: None,
+            tunneled: true,
+            anonymity: None,
             error: None,
         };
         pool.apply_health_result(&inconclusive, policy, &schedule)

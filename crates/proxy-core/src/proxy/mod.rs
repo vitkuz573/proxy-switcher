@@ -29,6 +29,14 @@ pub struct ProxyInfo {
     /// cycle. Without this the batch size was the whole unverified pool, and
     /// it grew with every scrape.
     pub next_probe_at: chrono::DateTime<chrono::Utc>,
+    /// Whether the proxy can carry a tunnel.
+    ///
+    /// A proxy that only forwards plain HTTP is no use for an arbitrary TCP
+    /// stream, which is what the router carries. The probe establishes this
+    /// rather than assuming it: many public proxies answer CONNECT with an
+    /// error and then serve ordinary requests perfectly well.
+    #[serde(default = "default_true")]
+    pub supports_tunnel: bool,
     /// The address traffic left from, as the target reported it.
     ///
     /// Two different proxy entries often share one exit address — the same
@@ -39,6 +47,11 @@ pub struct ProxyInfo {
     /// Consecutive failed probes. A single failure never evicts a proxy.
     pub consecutive_failures: u32,
     pub score: f64,
+}
+
+/// The default for a boolean that predates the column.
+fn default_true() -> bool {
+    true
 }
 
 impl ProxyInfo {
@@ -52,6 +65,8 @@ impl ProxyInfo {
         self.first_seen = now;
         // Due immediately: a new proxy should be probed as soon as possible.
         self.next_probe_at = now;
+        // Whether it can tunnel is unknown until it is probed.
+        self.supports_tunnel = true;
         self
     }
 }

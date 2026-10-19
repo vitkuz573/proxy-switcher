@@ -64,6 +64,10 @@ inconclusive_backoff_secs = 300
 # engine verifies a target directly before using it, so an unreachable target
 # pauses the checks instead of marking the whole pool dead.
 target_urls = [
+    # Reports both the source address and the request headers, which is what
+    # says whether the proxy leaked the client's address.
+    "http://httpbin.org/anything",
+    # Faster fallbacks that report only the address.
     "http://icanhazip.com",
     "http://api.ipify.org",
     "http://ifconfig.me/ip",

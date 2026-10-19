@@ -49,6 +49,7 @@ impl Storage {
             ("first_seen", "TEXT"),
             ("next_probe_at", "TEXT"),
             ("exit_ip", "TEXT"),
+            ("supports_tunnel", "INTEGER NOT NULL DEFAULT 1"),
         ] {
             if !self.has_column("proxies", column)? {
                 self.conn.execute_batch(&format!(
@@ -74,8 +75,8 @@ impl Storage {
     pub fn save_proxies(&self, proxies: &[ProxyInfo]) -> Result<()> {
         let mut stmt = self.conn.prepare_cached(
             "INSERT OR REPLACE INTO proxies
-             (id, host, port, protocol, anonymity, latency_ms, country, score, last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             (id, host, port, protocol, anonymity, latency_ms, country, score, last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, supports_tunnel)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         )?;
 
         for p in proxies {
@@ -94,6 +95,7 @@ impl Storage {
                 p.first_seen.to_rfc3339(),
                 p.next_probe_at.to_rfc3339(),
                 p.exit_ip,
+                p.supports_tunnel as i64,
             ])?;
         }
         Ok(())
@@ -111,8 +113,8 @@ impl Storage {
 
         let mut stmt = tx.prepare_cached(
             "INSERT INTO proxies
-             (id, host, port, protocol, anonymity, latency_ms, country, score, last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             (id, host, port, protocol, anonymity, latency_ms, country, score, last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, supports_tunnel)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         )?;
 
         for p in proxies {
@@ -131,6 +133,7 @@ impl Storage {
                 p.first_seen.to_rfc3339(),
                 p.next_probe_at.to_rfc3339(),
                 p.exit_ip,
+                p.supports_tunnel as i64,
             ])?;
         }
 
@@ -139,11 +142,37 @@ impl Storage {
         Ok(())
     }
 
+    /// Store the configured scrape sources.
+    ///
+    /// The list was held in memory only, so a source added through the API
+    /// was gone after the next restart, and the configuration file was the
+    /// only truth.
+    pub fn save_sources(&self, sources: &[String]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM sources", [])?;
+
+        let mut stmt = tx.prepare("INSERT INTO sources (url) VALUES (?1)")?;
+        for url in sources {
+            stmt.execute(rusqlite::params![url])?;
+        }
+
+        drop(stmt);
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The configured scrape sources.
+    pub fn load_sources(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT url FROM sources ORDER BY url")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Restore the pool, including what has already been verified.
     pub fn load_proxies(&self) -> Result<Vec<ProxyInfo>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, host, port, protocol, anonymity, latency_ms, country, score,
-                    last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip
+                    last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, supports_tunnel
              FROM proxies",
         )?;
 
@@ -177,6 +206,10 @@ impl Storage {
                 // not been probed under this schedule yet.
                 next_probe_at: parse_time(next_probe_at).unwrap_or_else(chrono::Utc::now),
                 exit_ip,
+                // A row written before the column existed has never been
+                // probed, so it is assumed to tunnel until a probe says
+                // otherwise.
+                supports_tunnel: row.get::<_, Option<i64>>(14)?.unwrap_or(1) != 0,
                 consecutive_failures: row.get::<_, Option<i64>>(10)?.unwrap_or(0).max(0) as u32,
                 score: row.get(7)?,
             })
@@ -216,6 +249,7 @@ mod tests {
             first_seen: chrono::Utc::now(),
             next_probe_at: chrono::Utc::now(),
             exit_ip: None,
+            supports_tunnel: true,
             consecutive_failures: 2,
             score: 0.75,
         }

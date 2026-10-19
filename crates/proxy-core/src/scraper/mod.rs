@@ -197,6 +197,7 @@ impl Scraper {
                     first_seen: chrono::Utc::now(),
                     next_probe_at: chrono::Utc::now(),
                     exit_ip: None,
+                    supports_tunnel: true,
                     consecutive_failures: 0,
                     score: 0.0,
                 });
@@ -240,6 +241,7 @@ impl Scraper {
                     first_seen: chrono::Utc::now(),
                     next_probe_at: chrono::Utc::now(),
                     exit_ip: None,
+                    supports_tunnel: true,
                     consecutive_failures: 0,
                     score: 0.0,
                 });
