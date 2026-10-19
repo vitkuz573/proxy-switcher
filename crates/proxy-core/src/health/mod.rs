@@ -1,4 +1,3 @@
-use crate::forwarder::Forwarder;
 use crate::proxy::ProxyInfo;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -50,6 +49,8 @@ pub struct HealthChecker {
     /// proxy measures the wrong thing, and a probe to the active proxy itself
     /// is a loop.
     mark: Option<u32>,
+    /// Opens the connection to the proxy.
+    forwarder: crate::forwarder::Forwarder,
     /// The target currently in use, and when it was last confirmed.
     ///
     /// The target is verified directly before it is used, so the engine only
@@ -183,12 +184,13 @@ async fn check_one(
     timeout: Duration,
     mark: Option<u32>,
     own_exit_ip: Option<std::net::IpAddr>,
+    forwarder: &crate::forwarder::Forwarder,
 ) -> HealthResult {
     let start = Instant::now();
 
     let mut conn = match tokio::time::timeout(
         connect_timeout,
-        Forwarder::connect_to(proxy, host, port, mark),
+        forwarder.connect_to(proxy, host, port, mark),
     )
     .await
     {
@@ -330,6 +332,7 @@ impl HealthChecker {
             connect_timeout: Duration::from_secs(connect_timeout_secs),
             timeout: Duration::from_secs(timeout_secs),
             mark,
+            forwarder: crate::forwarder::Forwarder::new(),
             active_target: std::sync::RwLock::new(None),
             target_ttl: Duration::from_secs(300),
         }
@@ -435,7 +438,7 @@ impl HealthChecker {
 
         let mut conn = tokio::time::timeout(
             timeout,
-            crate::forwarder::Forwarder::connect_direct(host, port, self.mark),
+            self.forwarder.connect_direct(host, port, self.mark),
         )
         .await
         .map_err(|_| "connect timed out".to_string())?
@@ -481,6 +484,7 @@ impl HealthChecker {
             self.timeout,
             self.mark,
             target.own_exit_ip,
+            &self.forwarder,
         )
         .await
     }
@@ -543,6 +547,7 @@ impl HealthChecker {
             let host = host.clone();
             let path = path.clone();
             let mark = self.mark;
+            let forwarder = self.forwarder.clone();
             let tx = tx.clone();
             let checked = checked.clone();
 
@@ -557,6 +562,7 @@ impl HealthChecker {
                     timeout,
                     mark,
                     own_exit_ip,
+                    &forwarder,
                 )
                 .await;
                 checked.fetch_add(1, Ordering::Relaxed);

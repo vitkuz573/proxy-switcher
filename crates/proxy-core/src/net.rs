@@ -66,6 +66,18 @@ pub async fn connect_tcp(addr: SocketAddr, mark: Option<u32>) -> io::Result<TcpS
 }
 
 /// Resolve a host and port into socket addresses.
+///
+/// An address literal is returned as it is: asking the resolver for one is
+/// pure overhead, and it fails outright when the service is not a number the
+/// resolver recognises.
+pub async fn resolve_host_port(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return Ok(vec![SocketAddr::new(ip, port)]);
+    }
+    resolve(host, port).await
+}
+
+/// Resolve a host and port into socket addresses.
 pub async fn resolve(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
     tokio::net::lookup_host((host, port))
         .await

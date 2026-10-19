@@ -20,6 +20,8 @@ pub struct Router {
     dns_cache: Arc<DnsCache>,
     /// Which destinations go through a proxy.
     policy: RoutePolicy,
+    /// Opens the connections the router forwards.
+    forwarder: Forwarder,
     /// Firewall mark for the sockets the router opens.
     ///
     /// The router's own connection to the proxy must not re-enter the TUN: a
@@ -35,6 +37,7 @@ impl Router {
             udp_tracker: UdpTracker::new(),
             pool,
             dns_cache: Arc::new(DnsCache::new()),
+            forwarder: Forwarder::new(),
             policy: RoutePolicy::default(),
             mark: None,
         }
@@ -47,6 +50,7 @@ impl Router {
             udp_tracker: UdpTracker::new(),
             pool,
             dns_cache: Arc::new(DnsCache::new()),
+            forwarder: Forwarder::new(),
             policy,
             mark,
         }
@@ -62,6 +66,7 @@ impl Router {
             udp_tracker: UdpTracker::new(),
             pool,
             dns_cache,
+            forwarder: Forwarder::new(),
             policy: RoutePolicy::default(),
             mark: None,
         }
@@ -73,6 +78,7 @@ impl Router {
             udp_tracker: UdpTracker::with_fwmark(fwmark),
             pool,
             dns_cache: Arc::new(DnsCache::new()),
+            forwarder: Forwarder::new(),
             policy: RoutePolicy::default(),
             mark: Some(fwmark),
         }
@@ -156,9 +162,15 @@ impl Router {
 
         let connection = match proxy {
             Some(proxy) => {
-                Forwarder::connect_to(&proxy, &target_host, key.dst_port, self.mark).await
+                self.forwarder
+                    .connect_to(&proxy, &target_host, key.dst_port, self.mark)
+                    .await
             }
-            None => Forwarder::connect_direct(&target_host, key.dst_port, self.mark).await,
+            None => {
+                self.forwarder
+                    .connect_direct(&target_host, key.dst_port, self.mark)
+                    .await
+            }
         };
 
         match connection {

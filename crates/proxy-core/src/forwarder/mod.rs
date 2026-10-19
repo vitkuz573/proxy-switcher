@@ -1,180 +1,107 @@
-use crate::proxy::{ProxyInfo, ProxyProtocol};
 use anyhow::Result;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
-use tokio_socks::tcp::Socks5Stream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub enum ForwardConnection {
-    Direct(tokio::net::TcpStream),
-    HttpConnect(tokio::net::TcpStream),
-    Socks5(Socks5Stream<tokio::net::TcpStream>),
-    Socks4(tokio_socks::tcp::Socks4Stream<tokio::net::TcpStream>),
+use crate::proxy::connector::base::{ConnectOptions, Target};
+use crate::proxy::connector::{BoxedStream, ConnectorRegistry};
+use crate::proxy::{ProxyInfo, ProxyProtocol};
+
+/// A stream carrying traffic, whatever the protocol underneath.
+pub type ForwardConnection = BoxedStream;
+
+/// Opens streams to targets, directly or through a proxy.
+///
+/// The protocols live in `proxy::connector`, each behind the `ProxyConnector`
+/// trait. This type is the single place that knows about the registry, so a
+/// new protocol is one module and one registration rather than another branch
+/// in every caller.
+#[derive(Clone)]
+pub struct Forwarder {
+    connectors: std::sync::Arc<ConnectorRegistry>,
 }
 
-impl AsyncRead for ForwardConnection {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            ForwardConnection::Direct(s) => std::pin::Pin::new(s).poll_read(cx, buf),
-            ForwardConnection::HttpConnect(s) => std::pin::Pin::new(s).poll_read(cx, buf),
-            ForwardConnection::Socks5(s) => std::pin::Pin::new(s).poll_read(cx, buf),
-            ForwardConnection::Socks4(s) => std::pin::Pin::new(s).poll_read(cx, buf),
-        }
+impl Default for Forwarder {
+    fn default() -> Self {
+        Self::with_connectors(ConnectorRegistry::with_defaults())
     }
 }
-
-impl ForwardConnection {
-    /// Non-blocking read. Returns `WouldBlock` if no data available.
-    pub fn try_read(&self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            ForwardConnection::Direct(s) => s.try_read(buf),
-            ForwardConnection::HttpConnect(s) => s.try_read(buf),
-            ForwardConnection::Socks5(s) => {
-                use std::ops::Deref;
-                s.deref().try_read(buf)
-            }
-            ForwardConnection::Socks4(s) => {
-                use std::ops::Deref;
-                s.deref().try_read(buf)
-            }
-        }
-    }
-}
-
-impl AsyncWrite for ForwardConnection {
-    fn poll_write(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        match self.get_mut() {
-            ForwardConnection::Direct(s) => std::pin::Pin::new(s).poll_write(cx, buf),
-            ForwardConnection::HttpConnect(s) => std::pin::Pin::new(s).poll_write(cx, buf),
-            ForwardConnection::Socks5(s) => std::pin::Pin::new(s).poll_write(cx, buf),
-            ForwardConnection::Socks4(s) => std::pin::Pin::new(s).poll_write(cx, buf),
-        }
-    }
-
-    fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            ForwardConnection::Direct(s) => std::pin::Pin::new(s).poll_flush(cx),
-            ForwardConnection::HttpConnect(s) => std::pin::Pin::new(s).poll_flush(cx),
-            ForwardConnection::Socks5(s) => std::pin::Pin::new(s).poll_flush(cx),
-            ForwardConnection::Socks4(s) => std::pin::Pin::new(s).poll_flush(cx),
-        }
-    }
-
-    fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            ForwardConnection::Direct(s) => std::pin::Pin::new(s).poll_shutdown(cx),
-            ForwardConnection::HttpConnect(s) => std::pin::Pin::new(s).poll_shutdown(cx),
-            ForwardConnection::Socks5(s) => std::pin::Pin::new(s).poll_shutdown(cx),
-            ForwardConnection::Socks4(s) => std::pin::Pin::new(s).poll_shutdown(cx),
-        }
-    }
-}
-
-pub struct Forwarder;
 
 impl Forwarder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A forwarder with a custom connector table.
+    pub fn with_connectors(connectors: ConnectorRegistry) -> Self {
+        Self {
+            connectors: std::sync::Arc::new(connectors),
+        }
+    }
+
+    /// The protocols this forwarder can open.
+    pub fn protocols(&self) -> Vec<ProxyProtocol> {
+        self.connectors.protocols()
+    }
+
     /// Connect straight to the target.
-    ///
-    /// `mark` sets a firewall mark on the socket, which makes the connection
-    /// bypass the TUN's routing table. The engine's own traffic always passes
-    /// it: a connection to the proxy under test that is itself routed through
-    /// a proxy is a loop.
     pub async fn connect_direct(
+        &self,
         target: &str,
         port: u16,
         mark: Option<u32>,
     ) -> Result<ForwardConnection> {
         let stream = connect_to_host(target, port, mark).await?;
-        Ok(ForwardConnection::Direct(stream))
+        Ok(Box::new(stream))
     }
 
-    /// Connect through a proxy to a target.
-    ///
-    /// The socket to the proxy is created here rather than by the SOCKS
-    /// libraries, so it can carry the bypass mark.
+    /// Connect to the target through the proxy.
     pub async fn connect_to(
+        &self,
         proxy: &ProxyInfo,
         target: &str,
         port: u16,
         mark: Option<u32>,
     ) -> Result<ForwardConnection> {
-        let proxy_addr = format!("{}:{}", proxy.host, proxy.port);
-
-        match proxy.protocol {
-            ProxyProtocol::Socks5 => {
-                let socket = connect_to_proxy(&proxy_addr, mark).await?;
-                let stream =
-                    Socks5Stream::connect_with_socket(socket, format!("{target}:{port}").as_str())
-                        .await?;
-                Ok(ForwardConnection::Socks5(stream))
-            }
-            ProxyProtocol::Socks4 => {
-                let socket = connect_to_proxy(&proxy_addr, mark).await?;
-                let stream = tokio_socks::tcp::Socks4Stream::connect_with_socket(
-                    socket,
-                    format!("{target}:{port}").as_str(),
-                )
-                .await?;
-                Ok(ForwardConnection::Socks4(stream))
-            }
-            ProxyProtocol::Http | ProxyProtocol::Https => {
-                let mut s = connect_to_proxy(&proxy_addr, mark).await?;
-                let connect =
-                    format!("CONNECT {target}:{port} HTTP/1.1\r\nHost: {target}:{port}\r\n\r\n");
-                use tokio::io::AsyncWriteExt;
-                s.write_all(connect.as_bytes()).await?;
-
-                let mut buf = [0u8; 1024];
-                let n = s.read(&mut buf).await?;
-                let response = String::from_utf8_lossy(&buf[..n]);
-                let alive =
-                    response.contains("200 Connection established") || response.contains("200 OK");
-                if !alive {
-                    anyhow::bail!(
-                        "HTTP CONNECT failed: {}",
-                        response.lines().next().unwrap_or("unknown")
-                    );
-                }
-                Ok(ForwardConnection::HttpConnect(s))
-            }
-        }
+        self.connect_to_with(
+            proxy,
+            &Target::new(target, port),
+            &ConnectOptions {
+                mark,
+                ..ConnectOptions::default()
+            },
+        )
+        .await
     }
-}
 
-/// Open the connection to the proxy itself, carrying the bypass mark.
-async fn connect_to_proxy(proxy_addr: &str, mark: Option<u32>) -> Result<tokio::net::TcpStream> {
-    let (host, port) = split_addr(proxy_addr)?;
-    connect_to_host(&host, port, mark).await
-}
+    /// Connect to the target through the proxy, with full options.
+    pub async fn connect_to_with(
+        &self,
+        proxy: &ProxyInfo,
+        target: &Target,
+        options: &ConnectOptions,
+    ) -> Result<ForwardConnection> {
+        let connector = self
+            .connectors
+            .get(proxy.protocol)
+            .ok_or_else(|| anyhow::anyhow!("no connector for the {} protocol", proxy.protocol))?;
 
-/// Split a `host:port` string.
-fn split_addr(addr: &str) -> Result<(String, u16)> {
-    let (host, port) = addr
-        .rsplit_once(':')
-        .ok_or_else(|| anyhow::anyhow!("malformed address: {addr}"))?;
-    let port = port
-        .parse::<u16>()
-        .map_err(|_| anyhow::anyhow!("malformed port in {addr}"))?;
-    Ok((host.to_string(), port))
+        if !connector.supports(target) {
+            anyhow::bail!(
+                "the {} protocol cannot carry a connection to {}:{}",
+                proxy.protocol,
+                target.host,
+                target.port
+            );
+        }
+
+        connector.connect(proxy, target, options).await
+    }
 }
 
 /// Connect to a host, skipping the resolver for an address literal.
 ///
 /// The resolver is not free: for a numeric address it is pure overhead, and
 /// asking it to resolve a literal with a service of `0` fails outright.
-async fn connect_to_host(
+pub async fn connect_to_host(
     host: &str,
     port: u16,
     mark: Option<u32>,
@@ -189,4 +116,32 @@ async fn connect_to_host(
     }
 
     Ok(crate::net::connect_first(&addrs, mark).await?)
+}
+
+/// Read an HTTP response's status line from a stream.
+pub async fn read_status_line<S: AsyncRead + Unpin>(stream: &mut S) -> Result<String> {
+    let mut buf = Vec::new();
+    let mut byte = [0u8; 1];
+
+    // The status line ends at the first line feed.
+    while buf.len() < 4096 {
+        let n = stream.read(&mut byte).await?;
+        if n == 0 {
+            break;
+        }
+        buf.push(byte[0]);
+        if byte[0] == b'\n' {
+            break;
+        }
+    }
+
+    let text = String::from_utf8_lossy(&buf);
+    Ok(text.lines().next().unwrap_or_default().trim().to_string())
+}
+
+/// Write a complete HTTP request to a stream.
+pub async fn write_request<S: AsyncWrite + Unpin>(stream: &mut S, request: &str) -> Result<()> {
+    stream.write_all(request.as_bytes()).await?;
+    stream.flush().await?;
+    Ok(())
 }

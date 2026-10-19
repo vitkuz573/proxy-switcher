@@ -7,6 +7,7 @@ async fn main() {
     // Test with known-working proxy found via curl:
     // Direct IP: 109.195.134.55
     // Through proxy 116.101.75.173:2079: 116.101.75.173
+    let forwarder = Forwarder::new();
     let proxy = ProxyInfo {
         id: "116.101.75.173:2079".into(),
         host: "116.101.75.173".into(),
@@ -29,7 +30,7 @@ async fn main() {
         proxy.host, proxy.port
     );
 
-    match Forwarder::connect_to(&proxy, "example.com", 80, None).await {
+    match forwarder.connect_to(&proxy, "example.com", 80, None).await {
         Ok(mut conn) => {
             let request = b"GET /ip HTTP/1.1\r\nHost: httpbin.org\r\nConnection: close\r\n\r\n";
             if let Err(e) = conn.write_all(request).await {
@@ -59,7 +60,7 @@ async fn main() {
     }
 
     println!("\n=== Direct connection (no proxy) ===");
-    match Forwarder::connect_direct("example.com", 80, None).await {
+    match forwarder.connect_direct("example.com", 80, None).await {
         Ok(mut conn) => {
             let request = b"GET /ip HTTP/1.1\r\nHost: httpbin.org\r\nConnection: close\r\n\r\n";
             if let Err(e) = conn.write_all(request).await {

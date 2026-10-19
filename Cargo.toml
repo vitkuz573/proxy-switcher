@@ -24,6 +24,19 @@ url = "2"
 rand = "0.10"
 libc = "0.2"
 sha2 = "0.11"
+# Connector architecture: protocols implement a trait and register themselves.
+async-trait = "0.1"
+# TLS for HTTPS proxies and for the newer protocols.
+rustls = "0.23"
+tokio-rustls = "0.26"
+webpki-roots = "1"
+rustls-pemfile = "2"
+# Shadowsocks and Trojan both need these.
+shadowsocks = "1.13"
+hkdf = "0.12"
+hmac = "0.12"
+sha1 = "0.10"
+cipher = "0.4"
 
 [profile.release]
 opt-level = 3

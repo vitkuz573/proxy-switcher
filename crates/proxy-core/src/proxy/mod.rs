@@ -1,3 +1,4 @@
+pub mod connector;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,13 +58,19 @@ impl ProxyInfo {
 
 /// Serialised in lowercase: the API contract, the generated SDK and the web UI
 /// all use `"http"`/`"socks5"`, and serde's default would emit `"Http"`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum ProxyProtocol {
     Http,
     Https,
     Socks4,
     Socks5,
+}
+
+impl std::fmt::Display for ProxyProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.scheme())
+    }
 }
 
 impl ProxyProtocol {
@@ -94,7 +101,7 @@ impl std::str::FromStr for ProxyProtocol {
 }
 
 /// Serialised in lowercase to match `ProxyProtocol` and the API contract.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Anonymity {
     Transparent,
