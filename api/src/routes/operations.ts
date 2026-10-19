@@ -375,6 +375,22 @@ export async function operationRoutes(app: FastifyInstance): Promise<void> {
   /* ── Routing ────────────────────────────────────────────────────────── */
 
   app.get(
+    "/api/v1/statistics",
+    {
+      preHandler: [app.authenticate, app.requireRole("viewer")],
+      schema: {
+        tags: ["statistics"],
+        summary: "The distribution of the pool, and how it has moved",
+        response: { 200: Ref("PoolStatistics"), 502: Ref("Problem") },
+      },
+    },
+    async (_req, reply) => {
+      const result = await callEngine(reply, () => app.engine.getStatistics());
+      return result.ok ? result.value : result.reply;
+    },
+  );
+
+  app.get(
     "/api/v1/routing",
     {
       preHandler: [app.authenticate, app.requireRole("viewer")],

@@ -300,7 +300,12 @@ async fn main() -> anyhow::Result<()> {
 
     let scrape_state = Arc::new(RwLock::new(api::ScrapeState::new(check_progress.clone())));
 
+    // The pool over time: one sample a minute, a day of history.
+    let history = api::PoolHistory::new(24 * 60);
+
     let app_state = api::AppState {
+        history: history.clone(),
+        min_score: config.pool.min_score,
         pool: pool.clone(),
         router: router.clone(),
         scraper: scraper.clone(),
@@ -575,6 +580,28 @@ async fn main() -> anyhow::Result<()> {
                     until_probe.min(until_scrape).max(1).min(scrape_interval)
                 };
                 tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+            }
+        });
+    }
+
+    // The sampler: one snapshot of the pool a minute, for the history.
+    {
+        let pool = pool.clone();
+        let history = history.clone();
+        let min_score = config.pool.min_score;
+
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+
+                let now = chrono::Utc::now();
+                let statistics = pool.statistics(min_score, now).await;
+                history.push(proxy_core::pool::statistics::HistorySample {
+                    at: now,
+                    pool_size: statistics.pool_size,
+                    working: statistics.working,
+                    due: statistics.due,
+                });
             }
         });
     }

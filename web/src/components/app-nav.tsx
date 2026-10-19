@@ -1,6 +1,6 @@
 "use client";
 
-import { Database, Globe, LayoutDashboard, ScrollText } from "lucide-react";
+import { BarChart3, Database, Globe, LayoutDashboard, ScrollText } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -16,6 +16,7 @@ const NAV = [
   { title: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { title: "Proxies", href: "/proxies", icon: Globe },
   { title: "Scraper", href: "/scraper", icon: Database },
+  { title: "Statistics", href: "/statistics", icon: BarChart3 },
   { title: "Audit", href: "/audit", icon: ScrollText },
 ] as const;
 

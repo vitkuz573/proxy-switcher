@@ -7,6 +7,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use proxy_core::health::HealthChecker;
+use proxy_core::pool::statistics::HistorySample;
 use proxy_core::pool::{EvictionPolicy, ProbeSchedule, ProxyPool};
 use proxy_core::proxy::{Anonymity, ProxyInfo, ProxyProtocol};
 use proxy_core::router::Router as ProxyRouter;
@@ -71,6 +72,44 @@ impl ScrapeState {
     }
 }
 
+/// A sample of the pool over time.
+///
+/// The samples are kept in a ring, so the history costs a fixed amount of
+/// memory whatever the pool grows to.
+#[derive(Clone)]
+pub struct PoolHistory {
+    samples: Arc<std::sync::Mutex<std::collections::VecDeque<HistorySample>>>,
+    /// How many samples are kept.
+    capacity: usize,
+}
+
+impl PoolHistory {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            samples: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            capacity,
+        }
+    }
+
+    /// Record a sample, dropping the oldest when the history is full.
+    pub fn push(&self, sample: HistorySample) {
+        if let Ok(mut samples) = self.samples.lock() {
+            if samples.len() >= self.capacity {
+                samples.pop_front();
+            }
+            samples.push_back(sample);
+        }
+    }
+
+    /// The samples, oldest first.
+    pub fn samples(&self) -> Vec<HistorySample> {
+        self.samples
+            .lock()
+            .map(|samples| samples.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub pool: Arc<ProxyPool>,
@@ -87,6 +126,10 @@ pub struct AppState {
     pub eviction_policy: EvictionPolicy,
     /// Where the source list is stored, so a change survives a restart.
     pub db_path: Option<std::path::PathBuf>,
+    /// The pool over time.
+    pub history: PoolHistory,
+    /// The floor below which a working proxy is not worth selecting.
+    pub min_score: f64,
     /// Which traffic a proxy applies to.
     pub route_policy: RoutePolicy,
     /// The firewall mark the daemon's own traffic carries.
@@ -240,6 +283,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/summary", get(get_summary))
         .route("/api/v1/routing", get(get_routing))
+        .route("/api/v1/statistics", get(get_statistics))
         .route("/api/v1/stats", get(get_stats))
         .route("/api/v1/dns", get(get_dns))
         // Proxies
@@ -287,6 +331,30 @@ async fn get_routing(State(state): State<AppState>) -> Json<RoutingInfo> {
         default_route: state.default_route,
         active_proxy: state.pool.active().await.map(|p| p.id),
     })
+}
+
+/// The distribution of the pool, and how it has moved.
+async fn get_statistics(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let now = chrono::Utc::now();
+    let statistics = state.pool.statistics(state.min_score, now).await;
+
+    // The history rides along with the distribution: one request, one picture.
+    let history = state.history.samples();
+
+    Json(serde_json::json!({
+        "pool_size": statistics.pool_size,
+        "working": statistics.working,
+        "tunnel_capable": statistics.tunnel_capable,
+        "unverified": statistics.unverified,
+        "below_threshold": statistics.below_threshold,
+        "due": statistics.due,
+        "by_protocol": statistics.by_protocol,
+        "by_anonymity": statistics.by_anonymity,
+        "by_country": statistics.by_country,
+        "latency": statistics.latency,
+        "distinct_exit_addresses": statistics.distinct_exit_addresses,
+        "history": history,
+    }))
 }
 
 async fn get_stats(State(state): State<AppState>) -> Json<serde_json::Value> {

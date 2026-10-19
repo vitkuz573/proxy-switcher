@@ -2,6 +2,7 @@ import "server-only";
 import {
   type AuditEvent,
   createProxySwitcherClient,
+  type PoolStatistics,
   type ProxyRecord,
   type RoutingInfo,
   type ScrapeRun,
@@ -43,6 +44,10 @@ async function read<T>(operation: () => Promise<T>, fallback: T): Promise<T> {
 
 export async function getSummary(): Promise<Summary | null> {
   return read(() => serverClient().then((api) => api.getSummary()), null);
+}
+
+export async function getStatistics(): Promise<PoolStatistics | null> {
+  return read(() => serverClient().then((api) => api.getStatistics()), null);
 }
 
 export async function getRouting(): Promise<RoutingInfo | null> {

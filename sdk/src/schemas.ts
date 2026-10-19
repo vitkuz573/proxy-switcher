@@ -192,6 +192,56 @@ export const RoutingInfoSchema = Type.Object(
 );
 export type RoutingInfo = Static<typeof RoutingInfoSchema>;
 
+/** How many proxies there are, and how many of them work. */
+export const PoolStatisticsSchema = Type.Object(
+  {
+    pool_size: Type.Integer(),
+    working: Type.Integer(),
+    tunnel_capable: Type.Integer(),
+    unverified: Type.Integer(),
+    below_threshold: Type.Integer(),
+    due: Type.Integer(),
+    by_protocol: Type.Array(
+      Type.Object({
+        protocol: ProxyProtocolSchema,
+        count: Type.Integer(),
+        working: Type.Integer(),
+      }),
+    ),
+    by_anonymity: Type.Array(
+      Type.Object({
+        anonymity: AnonymitySchema,
+        count: Type.Integer(),
+        working: Type.Integer(),
+      }),
+    ),
+    by_country: Type.Array(
+      Type.Object({
+        country: Type.String(),
+        count: Type.Integer(),
+        working: Type.Integer(),
+      }),
+    ),
+    latency: Type.Array(
+      Type.Object({
+        range: Type.String(),
+        count: Type.Integer(),
+      }),
+    ),
+    distinct_exit_addresses: Type.Integer(),
+    history: Type.Array(
+      Type.Object({
+        at: Type.String({ format: "date-time" }),
+        pool_size: Type.Integer(),
+        working: Type.Integer(),
+        due: Type.Integer(),
+      }),
+    ),
+  },
+  { $id: "PoolStatistics" },
+);
+export type PoolStatistics = Static<typeof PoolStatisticsSchema>;
+
 /** RFC 9457 problem document. The single error shape for the whole API. */
 export const ProblemSchema = Type.Object(
   {
@@ -222,6 +272,7 @@ export const SCHEMAS = {
   CreatedApiToken: CreatedApiTokenSchema,
   TokenExchange: TokenExchangeSchema,
   AuditEvent: AuditEventSchema,
+  PoolStatistics: PoolStatisticsSchema,
   RoutingPolicy: RoutingPolicySchema,
   RoutingInfo: RoutingInfoSchema,
   Problem: ProblemSchema,

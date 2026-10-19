@@ -1,6 +1,7 @@
 import type { Config } from "../config.js";
 import type {
   Anonymity,
+  PoolStatistics,
   Problem,
   ProxyProtocol,
   ProxyRecord,
@@ -205,6 +206,10 @@ export class EngineClient {
 
   getSummary(): Promise<Summary> {
     return this.request<Summary>("GET", "/api/v1/summary");
+  }
+
+  getStatistics(): Promise<PoolStatistics> {
+    return this.request<PoolStatistics>("GET", "/api/v1/statistics");
   }
 
   getRouting(): Promise<RoutingInfo> {

@@ -2,6 +2,7 @@ import type {
   ApiToken,
   AuditEvent,
   CreatedApiToken,
+  PoolStatistics,
   Problem,
   ProxyProtocol,
   ProxyRecord,
@@ -276,6 +277,11 @@ export class ProxySwitcherClient {
 
   getStats(): Promise<Stats> {
     return this.request("GET", "/api/v1/stats");
+  }
+
+  /** The distribution of the pool, and how it has moved. */
+  getStatistics(): Promise<PoolStatistics> {
+    return this.request("GET", "/api/v1/statistics");
   }
 
   /** The routing policy in force, and the state of the TUN bypass. */

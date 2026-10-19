@@ -1,3 +1,5 @@
+pub mod statistics;
+
 use crate::health::{HealthResult, Verdict};
 use crate::proxy::ProxyInfo;
 use std::collections::{HashMap, HashSet};
