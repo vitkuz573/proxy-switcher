@@ -12,10 +12,12 @@ Group=proxy-switcher
 WorkingDirectory=/opt/proxy-switcher/current-web
 EnvironmentFile=/etc/proxy-switcher/web.env
 Environment=PORT=3100
-Environment=HOSTNAME=127.0.0.1
 Environment=NODE_ENV=production
 EnvironmentFile=-/etc/proxy-switcher/api.env
-ExecStart=/usr/local/bin/node node_modules/next/dist/bin/next start
+# Next ignores the HOSTNAME environment variable here, so the bind address is
+# passed explicitly. Without it the server listens on every interface, which
+# would put the login form on the network over plain HTTP.
+ExecStart=/usr/local/bin/node node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 3100
 Restart=on-failure
 RestartSec=5
 
