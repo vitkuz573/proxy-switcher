@@ -1,0 +1,21 @@
+{
+  "name": "proxy-switcher",
+  "private": true,
+  "version": "2.0.0",
+  "packageManager": "pnpm@12.8.1",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "pnpm -r --filter \"./api\" --filter \"./sdk\" --filter \"./cli\" build && pnpm --filter \"./web\" build",
+    "dev": "pnpm --parallel --filter \"./api\" --filter \"./web\" dev",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "sdk:generate": "pnpm --filter \"./api\" sdk:generate",
+    "ci": "./scripts/ci.sh",
+    "engine:build": "cargo build --release --workspace",
+    "engine:test": "cargo test --workspace",
+    "engine:lint": "cargo clippy --workspace -- -D warnings"
+  }
+}

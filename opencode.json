@@ -1,0 +1,13 @@
+{
+  "mcp": {
+    "servers": {
+      "shadcn": {
+        "type": "local",
+        "command": [
+          "shadcn",
+          "mcp"
+        ]
+      }
+    }
+  }
+}

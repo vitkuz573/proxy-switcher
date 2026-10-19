@@ -1,0 +1,12 @@
+packages:
+  - "api"
+  - "sdk"
+  - "web"
+  - "cli"
+
+# pnpm >=11 replaced onlyBuiltDependencies with allowBuilds. These two packages
+# need lifecycle scripts: better-sqlite3 builds/downloads its native binding,
+# esbuild ships a platform binary.
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true

@@ -4,4 +4,11 @@ frontend/dist/
 *.swp
 *.swo
 .DS_Store
+
+# TypeScript / pnpm workspace
+dist/
+node_modules/
+.next/
+*.tsbuildinfo
 .env
+.env.local
