@@ -172,6 +172,7 @@ export function ProxiesTable({
                 <TableHead>Anonymity</TableHead>
                 <TableHead className="text-right">Latency</TableHead>
                 <TableHead className="text-right">Score</TableHead>
+                <TableHead>Egress</TableHead>
                 <TableHead>Checked</TableHead>
                 <TableHead className="w-12" />
               </TableRow>
@@ -230,7 +231,7 @@ export function ProxiesTable({
 
               {visible.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="h-24 text-center text-muted-foreground">
+                  <TableCell colSpan={8} className="h-24 text-center text-muted-foreground">
                     {proxies.length === 0
                       ? "No proxies in the pool. Trigger a scrape or add one manually."
                       : "Nothing matches this filter."}

@@ -4,6 +4,7 @@ import type {
   Problem,
   ProxyProtocol,
   ProxyRecord,
+  RoutingInfo,
   ScrapeRun,
   Source,
   Stats,
@@ -204,6 +205,10 @@ export class EngineClient {
 
   getSummary(): Promise<Summary> {
     return this.request<Summary>("GET", "/api/v1/summary");
+  }
+
+  getRouting(): Promise<RoutingInfo> {
+    return this.request<RoutingInfo>("GET", "/api/v1/routing");
   }
 
   getStats(): Promise<Stats> {

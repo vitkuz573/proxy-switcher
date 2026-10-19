@@ -6,9 +6,32 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 
+/// A probe target that answered a direct request.
+#[derive(Debug, Clone)]
+pub struct ActiveTarget {
+    pub url: String,
+    pub host: String,
+    pub port: u16,
+    pub path: String,
+    /// The address the engine reached the target from.
+    pub own_exit_ip: Option<std::net::IpAddr>,
+    /// Whether the engine reached the target directly.
+    ///
+    /// An unverified target still works: the proxies may reach it even when
+    /// the engine cannot. What is lost is the comparison against the engine's
+    /// own address, and with it the ability to spot an impostor.
+    pub verified: bool,
+    checked_at: std::time::Instant,
+}
+
 pub struct HealthChecker {
     concurrency: Arc<Semaphore>,
-    target_url: String,
+    /// Probe targets, tried in order.
+    ///
+    /// More than one, because the target is a third party: it can be blocked,
+    /// overloaded or simply down. A single unreachable target would otherwise
+    /// mark every proxy in the pool as dead.
+    target_urls: Vec<String>,
     /// Budget for the proxy handshake.
     ///
     /// Kept separate from the exchange budget because they measure different
@@ -20,6 +43,21 @@ pub struct HealthChecker {
     connect_timeout: Duration,
     /// Budget for writing the request and reading the response.
     timeout: Duration,
+    /// Firewall mark for the socket to the proxy.
+    ///
+    /// The health check opens the very connection the TUN would otherwise
+    /// capture, so it has to bypass the TUN: a probe that is routed through a
+    /// proxy measures the wrong thing, and a probe to the active proxy itself
+    /// is a loop.
+    mark: Option<u32>,
+    /// The target currently in use, and when it was last confirmed.
+    ///
+    /// The target is verified directly before it is used, so the engine only
+    /// ever draws conclusions about a proxy when it can reach the target
+    /// itself.
+    active_target: std::sync::RwLock<Option<ActiveTarget>>,
+    /// How long a confirmed target stays valid.
+    target_ttl: std::time::Duration,
 }
 
 /// Outcome of a single probe.
@@ -44,15 +82,22 @@ pub struct HealthResult {
     pub verdict: Verdict,
     pub latency_ms: u64,
     pub error: Option<String>,
+    /// The address the target reported for the request.
+    ///
+    /// This is the address the traffic actually left from. Comparing it with
+    /// the engine's own address is what proves the endpoint is a working proxy
+    /// rather than something that merely answers HTTP.
+    pub exit_ip: Option<std::net::IpAddr>,
 }
 
 impl HealthResult {
-    pub fn working(proxy_id: &str, latency_ms: u64) -> Self {
+    pub fn working(proxy_id: &str, latency_ms: u64, exit_ip: Option<std::net::IpAddr>) -> Self {
         Self {
             proxy_id: proxy_id.to_string(),
             verdict: Verdict::Working,
             latency_ms,
             error: None,
+            exit_ip,
         }
     }
 
@@ -62,6 +107,7 @@ impl HealthResult {
             verdict: Verdict::Failed,
             latency_ms: 0,
             error: Some(reason.into()),
+            exit_ip: None,
         }
     }
 
@@ -71,6 +117,7 @@ impl HealthResult {
             verdict: Verdict::Inconclusive,
             latency_ms: 0,
             error: Some(reason.into()),
+            exit_ip: None,
         }
     }
 
@@ -134,18 +181,23 @@ async fn check_one(
     path: &str,
     connect_timeout: Duration,
     timeout: Duration,
+    mark: Option<u32>,
+    own_exit_ip: Option<std::net::IpAddr>,
 ) -> HealthResult {
     let start = Instant::now();
 
-    let mut conn =
-        match tokio::time::timeout(connect_timeout, Forwarder::connect_to(proxy, host, port)).await
-        {
-            Ok(Ok(conn)) => conn,
-            // Refused, reset, DNS failure: the endpoint is not usable.
-            Ok(Err(e)) => return HealthResult::failed(&proxy.id, format!("connect error: {e}")),
-            // Nothing came back in time — the proxy's state is unknown.
-            Err(_) => return HealthResult::inconclusive(&proxy.id, "connect timeout"),
-        };
+    let mut conn = match tokio::time::timeout(
+        connect_timeout,
+        Forwarder::connect_to(proxy, host, port, mark),
+    )
+    .await
+    {
+        Ok(Ok(conn)) => conn,
+        // Refused, reset, DNS failure: the endpoint is not usable.
+        Ok(Err(e)) => return HealthResult::failed(&proxy.id, format!("connect error: {e}")),
+        // Nothing came back in time — the proxy's state is unknown.
+        Err(_) => return HealthResult::inconclusive(&proxy.id, "connect timeout"),
+    };
 
     let authority = if port == 80 {
         host.to_string()
@@ -175,20 +227,93 @@ async fn check_one(
                 .trim()
                 .to_string();
 
-            // A valid status line proves the tunnel carried a request and
-            // returned a response. Anything else means this endpoint is not
-            // actually a proxy — often a plain web server on the same port.
-            if status.starts_with("HTTP/1.0") || status.starts_with("HTTP/1.1") {
-                HealthResult::working(&proxy.id, start.elapsed().as_millis() as u64)
-            } else if status.is_empty() {
-                HealthResult::inconclusive(&proxy.id, "no HTTP response")
-            } else {
-                HealthResult::failed(&proxy.id, format!("not an HTTP proxy: {status}"))
+            // The status line alone is not proof. A plain web server on the
+            // same port, an intercepting middlebox, or a captive portal all
+            // answer with a valid status line, and all of them were counted
+            // as working proxies.
+            //
+            // What proves it is the target itself answering: the request went
+            // through the tunnel and came back from the destination.
+            if !status.starts_with("HTTP/1.0") && !status.starts_with("HTTP/1.1") {
+                return if status.is_empty() {
+                    HealthResult::inconclusive(&proxy.id, "no HTTP response")
+                } else {
+                    HealthResult::failed(&proxy.id, format!("not an HTTP proxy: {status}"))
+                };
             }
+
+            let code = status
+                .split_whitespace()
+                .nth(1)
+                .and_then(|c| c.parse::<u16>().ok())
+                .unwrap_or(0);
+
+            // 407 is a proxy that wants credentials: it cannot be used. The
+            // tunnel was established, so this is the proxy answering, and it
+            // is the one thing that is conclusively wrong with it.
+            if code == 407 {
+                return HealthResult::failed(&proxy.id, "proxy requires authentication");
+            }
+
+            // A non-success answer is not evidence against the proxy. The
+            // tunnel was established, so the proxy did relay the request; the
+            // status is the target's business, and the target may be down,
+            // overloaded or blocking this network. Counting that as a failure
+            // condemns the whole pool whenever a third-party service has a
+            // bad day.
+            if !(200..300).contains(&code) {
+                return HealthResult::inconclusive(&proxy.id, format!("target answered {status}"));
+            }
+
+            // The body carries the address the target saw. It is both the
+            // proof that the request really travelled through the proxy and
+            // the address the traffic will leave from.
+            let body = String::from_utf8_lossy(&buf);
+            let Some(exit_ip) = extract_exit_ip(&body) else {
+                // The tunnel carried the request and the target answered, but
+                // it did not report an address. The proxy works; there is
+                // simply nothing to confirm the exit address with.
+                return HealthResult::working(&proxy.id, start.elapsed().as_millis() as u64, None);
+            };
+
+            // The same address the engine gets means the request never left
+            // through the proxy: the endpoint answered, but did not relay.
+            if own_exit_ip == Some(exit_ip) {
+                return HealthResult::failed(&proxy.id, "the endpoint did not proxy the request");
+            }
+
+            HealthResult::working(&proxy.id, start.elapsed().as_millis() as u64, Some(exit_ip))
         }
         Ok(Err(e)) => HealthResult::failed(&proxy.id, format!("read error: {e}")),
         Err(_) => HealthResult::inconclusive(&proxy.id, "read timeout"),
     }
+}
+
+/// Extract the client address from a response body.
+///
+/// The echo services answer either with a bare address or with a small JSON
+/// document, so both are accepted. The address is what proves the request
+/// travelled through the proxy, so a body without one is a failure.
+fn extract_exit_ip(body: &str) -> Option<std::net::IpAddr> {
+    // A JSON document: prefer the "ip" or "origin" field.
+    for key in ["\"ip\"", "\"origin\"", "\"query\""] {
+        if let Some(value) = body.split(key).nth(1) {
+            let value = value.split('"').nth(1).unwrap_or_default();
+            if let Ok(ip) = value.trim().parse::<std::net::IpAddr>() {
+                return Some(ip);
+            }
+        }
+    }
+
+    // Otherwise, the first thing in the body that parses as an address.
+    body.split(|c: char| c.is_whitespace() || c == ',' || c == '"' || c == '<')
+        .filter(|token| !token.is_empty())
+        .find_map(|token| {
+            token
+                .trim_matches(|c: char| !c.is_ascii_graphic())
+                .parse()
+                .ok()
+        })
 }
 
 impl HealthChecker {
@@ -196,27 +321,166 @@ impl HealthChecker {
         concurrency: usize,
         timeout_secs: u64,
         connect_timeout_secs: u64,
-        target_url: String,
+        target_urls: Vec<String>,
+        mark: Option<u32>,
     ) -> Self {
         Self {
             concurrency: Arc::new(Semaphore::new(concurrency)),
-            target_url,
+            target_urls,
             connect_timeout: Duration::from_secs(connect_timeout_secs),
             timeout: Duration::from_secs(timeout_secs),
+            mark,
+            active_target: std::sync::RwLock::new(None),
+            target_ttl: Duration::from_secs(300),
         }
+    }
+
+    /// The engine's own address, as the target sees it.
+    pub fn own_exit_ip(&self) -> Option<std::net::IpAddr> {
+        self.active_target
+            .read()
+            .ok()
+            .and_then(|slot| slot.as_ref().and_then(|t| t.own_exit_ip))
+    }
+
+    /// The target currently in use.
+    pub fn active_target_url(&self) -> Option<String> {
+        self.active_target
+            .read()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|t| t.url.clone()))
+    }
+
+    /// Find a target the engine can actually reach.
+    ///
+    /// The target is requested directly, without a proxy, and the address the
+    /// target reports is the engine's own egress address. Two things follow
+    /// from that:
+    ///
+    /// - a proxy that reports the same address is not proxying, and
+    /// - when no target answers, nothing is known about the proxies, so the
+    ///   batch must not run. Marking fifteen thousand proxies dead because a
+    ///   third-party service is unreachable is the worst possible failure
+    ///   mode: the pool empties and there is nothing left to proxy with.
+    ///
+    /// The result is cached, because the check runs on every batch.
+    pub async fn resolve_target(&self) -> Option<ActiveTarget> {
+        if let Ok(slot) = self.active_target.read() {
+            if let Some(target) = slot.as_ref() {
+                if target.checked_at.elapsed() < self.target_ttl {
+                    return Some(target.clone());
+                }
+            }
+        }
+
+        for url in &self.target_urls {
+            let (host, port, path) = parse_target(url);
+            match self.request_direct(&host, port, &path).await {
+                Ok(Some(exit_ip)) => {
+                    let target = ActiveTarget {
+                        url: url.clone(),
+                        host,
+                        port,
+                        path,
+                        own_exit_ip: Some(exit_ip),
+                        verified: true,
+                        checked_at: std::time::Instant::now(),
+                    };
+                    if let Ok(mut slot) = self.active_target.write() {
+                        *slot = Some(target.clone());
+                    }
+                    return Some(target);
+                }
+                Ok(None) => {
+                    tracing::warn!(target = %url, "probe target answered without an address");
+                }
+                Err(e) => {
+                    tracing::warn!(target = %url, error = %e, "probe target is unreachable");
+                }
+            }
+        }
+
+        // No target answered directly. That does not mean the proxies cannot
+        // reach one: they are elsewhere, on networks that are often less
+        // restricted than the engine's own. The batch still runs against the
+        // first configured target — a target that is down from here produces
+        // inconclusive verdicts, which change nothing in the pool, rather than
+        // a skipped batch or a pool full of wrongly condemned proxies.
+        let url = self.target_urls.first()?;
+
+        let (host, port, path) = parse_target(url);
+        let target = ActiveTarget {
+            url: url.clone(),
+            host,
+            port,
+            path,
+            own_exit_ip: None,
+            verified: false,
+            checked_at: std::time::Instant::now(),
+        };
+        if let Ok(mut slot) = self.active_target.write() {
+            *slot = Some(target.clone());
+        }
+        Some(target)
+    }
+
+    /// Request a target directly, bypassing the TUN.
+    async fn request_direct(
+        &self,
+        host: &str,
+        port: u16,
+        path: &str,
+    ) -> Result<Option<std::net::IpAddr>, String> {
+        let timeout = self.timeout;
+
+        let mut conn = tokio::time::timeout(
+            timeout,
+            crate::forwarder::Forwarder::connect_direct(host, port, self.mark),
+        )
+        .await
+        .map_err(|_| "connect timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+
+        let authority = if port == 80 {
+            host.to_string()
+        } else {
+            format!("{host}:{port}")
+        };
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: {authority}\r\n\
+             User-Agent: proxy-switcher-health/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+        );
+
+        use tokio::io::AsyncWriteExt;
+        tokio::time::timeout(timeout, conn.write_all(request.as_bytes()))
+            .await
+            .map_err(|_| "write timed out".to_string())?
+            .map_err(|e| e.to_string())?;
+
+        let mut buf = Vec::new();
+        tokio::time::timeout(timeout, conn.read_to_end(&mut buf))
+            .await
+            .map_err(|_| "read timed out".to_string())?
+            .map_err(|e| e.to_string())?;
+
+        Ok(extract_exit_ip(&String::from_utf8_lossy(&buf)))
     }
 
     /// Probe a single proxy, taking one concurrency permit.
     pub async fn check(&self, proxy: &ProxyInfo) -> HealthResult {
         let _permit = self.concurrency.acquire().await.expect("Semaphore closed");
-        let (host, port, path) = parse_target(&self.target_url);
+        let Some(target) = self.resolve_target().await else {
+            return HealthResult::inconclusive(&proxy.id, "no reachable probe target");
+        };
         check_one(
             proxy,
-            &host,
-            port,
-            &path,
+            &target.host,
+            target.port,
+            &target.path,
             self.connect_timeout,
             self.timeout,
+            self.mark,
+            target.own_exit_ip,
         )
         .await
     }
@@ -245,6 +509,21 @@ impl HealthChecker {
         let total = proxies.len();
         checked.store(0, Ordering::Relaxed);
 
+        // A target that the engine cannot reach directly is not a reason to
+        // stop. The proxies live on other networks, which are often less
+        // restricted than the engine's own — a target that is blocked here may
+        // be perfectly reachable through a proxy. The batch runs anyway; a
+        // target that is genuinely down produces inconclusive verdicts, which
+        // change nothing in the pool.
+        let Some(target) = self.resolve_target().await else {
+            tracing::error!("no probe target is configured; skipping the batch");
+            return CheckCounts::default();
+        };
+        let host = target.host.clone();
+        let path = target.path.clone();
+        let port = target.port;
+        let own_exit_ip = target.own_exit_ip;
+
         // Channel capacity equals the batch size, so probe tasks never block on
         // the result send and the drain loop is not part of the critical path.
         let (tx, mut rx) = tokio::sync::mpsc::channel(total.max(1));
@@ -259,15 +538,27 @@ impl HealthChecker {
                 .acquire_owned()
                 .await
                 .expect("Semaphore closed");
-            let (host, port, path) = parse_target(&self.target_url);
             let timeout = self.timeout;
             let connect_timeout = self.connect_timeout;
+            let host = host.clone();
+            let path = path.clone();
+            let mark = self.mark;
             let tx = tx.clone();
             let checked = checked.clone();
 
             tokio::spawn(async move {
                 let _permit = permit;
-                let result = check_one(&proxy, &host, port, &path, connect_timeout, timeout).await;
+                let result = check_one(
+                    &proxy,
+                    &host,
+                    port,
+                    &path,
+                    connect_timeout,
+                    timeout,
+                    mark,
+                    own_exit_ip,
+                )
+                .await;
                 checked.fetch_add(1, Ordering::Relaxed);
                 let _ = tx.send(result).await;
             });

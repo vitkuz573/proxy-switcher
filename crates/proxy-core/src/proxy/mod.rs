@@ -28,6 +28,13 @@ pub struct ProxyInfo {
     /// cycle. Without this the batch size was the whole unverified pool, and
     /// it grew with every scrape.
     pub next_probe_at: chrono::DateTime<chrono::Utc>,
+    /// The address traffic left from, as the target reported it.
+    ///
+    /// Two different proxy entries often share one exit address — the same
+    /// endpoint published under many names. Seeing the address makes that
+    /// visible.
+    #[serde(default)]
+    pub exit_ip: Option<String>,
     /// Consecutive failed probes. A single failure never evicts a proxy.
     pub consecutive_failures: u32,
     pub score: f64,

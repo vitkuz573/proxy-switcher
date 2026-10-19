@@ -3,6 +3,7 @@ import {
   type AuditEvent,
   createProxySwitcherClient,
   type ProxyRecord,
+  type RoutingInfo,
   type ScrapeRun,
   type Source,
   type Stats,
@@ -42,6 +43,10 @@ async function read<T>(operation: () => Promise<T>, fallback: T): Promise<T> {
 
 export async function getSummary(): Promise<Summary | null> {
   return read(() => serverClient().then((api) => api.getSummary()), null);
+}
+
+export async function getRouting(): Promise<RoutingInfo | null> {
+  return read(() => serverClient().then((api) => api.getRouting()), null);
 }
 
 export async function getStats(): Promise<Stats | null> {

@@ -2,7 +2,7 @@ import { Activity, Globe, RefreshCw, Server } from "lucide-react";
 import { HealthProgress, IDLE_SCRAPE_RUN } from "@/components/health-progress";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { getScrapeRun, getStats, getSummary } from "@/lib/api";
+import { getRouting, getScrapeRun, getStats, getSummary } from "@/lib/api";
 
 export const metadata = { title: "Dashboard" };
 
@@ -19,6 +19,7 @@ export default function DashboardPage() {
       {/* Each section reads the session, so each streams in behind the layout's
           Suspense boundary instead of blocking the whole route. */}
       <StatsRow />
+      <RoutingPanel />
       <ScraperPanel />
     </>
   );
@@ -54,6 +55,28 @@ async function StatsRow() {
         hint="resolved names"
       />
     </section>
+  );
+}
+
+async function RoutingPanel() {
+  const routing = await getRouting();
+
+  return (
+    <Card>
+      <CardContent className="grid gap-2">
+        <div className="flex items-center justify-between text-sm">
+          <span className="text-muted-foreground">Proxied traffic</span>
+          <Badge variant={routing?.enabled ? "default" : "outline"}>
+            {routing?.enabled ? routing.policy.mode : "none"}
+          </Badge>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {routing?.enabled
+            ? `${routing.policy.cidrs.length + routing.policy.domains.length} rules apply`
+            : "No traffic goes through a proxy. A proxy is a tool for specific destinations, not a default route."}
+        </p>
+      </CardContent>
+    </Card>
   );
 }
 

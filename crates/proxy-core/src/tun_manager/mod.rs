@@ -124,20 +124,108 @@ impl TunManager {
         Ok(())
     }
 
-    /// Set up a policy routing rule so that UDP sockets with the given
-    /// firewall mark bypass the TUN and go through the real gateway.
-    /// Must be called before the forwarding loop starts.
+    /// Set up a policy routing rule so that marked sockets bypass the TUN and
+    /// follow the same path as ordinary traffic.
+    ///
+    /// The bypass table is a copy of the main table rather than a single
+    /// default route. That matters: the main table is where an installed VPN
+    /// keeps its routes, and a bypass table with one route through the
+    /// physical gateway sends the daemon's traffic around the VPN as well.
+    /// Losing the VPN means losing the very endpoints the daemon has to
+    /// reach — the proxies it tests and the targets it verifies them against.
+    ///
+    /// Only routes through the TUN device itself are left out, which is the
+    /// whole point: the daemon's own traffic never re-enters the device.
     pub async fn setup_fwmark_routing(
         gateway: &str,
         iface: &str,
         table: u32,
         mark: u32,
     ) -> Result<()> {
-        // Create a custom routing table that goes through the real gateway
+        // Clear anything left by a previous run: `ip rule add` happily
+        // accumulates duplicates, and every restart would leave another one.
+        // The delete removes one rule at a time, so it is repeated until it
+        // stops finding any.
+        loop {
+            let out = tokio::process::Command::new("ip")
+                .args([
+                    "rule",
+                    "del",
+                    "fwmark",
+                    &mark.to_string(),
+                    "table",
+                    &table.to_string(),
+                ])
+                .output()
+                .await?;
+
+            if !out.status.success() {
+                break;
+            }
+        }
+
+        // Copy the main table, minus the device this daemon owns.
+        let routes = tokio::process::Command::new("sh")
+            .args([
+                "-c",
+                "ip route show table main | grep -v ' dev ps-tun' || true",
+            ])
+            .output()
+            .await
+            .context("Failed to read the main routing table")?;
+
+        let mut copied = 0usize;
+        for line in String::from_utf8_lossy(&routes.stdout).lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            // `ip route show` prints attributes that `ip route add` refuses.
+            let mut args: Vec<String> = Vec::new();
+            let mut skip_next = false;
+            for token in line.split_whitespace() {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                if token == "proto" {
+                    skip_next = true;
+                    continue;
+                }
+                args.push(token.to_string());
+            }
+
+            if args.is_empty() {
+                continue;
+            }
+
+            let mut command = vec!["route".to_string(), "replace".to_string()];
+            command.push("table".to_string());
+            command.push(table.to_string());
+            command.extend(args);
+
+            let out = tokio::process::Command::new("ip")
+                .args(&command)
+                .output()
+                .await?;
+
+            if out.status.success() {
+                copied += 1;
+            } else {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if !stderr.contains("File exists") {
+                    warn!("could not copy a route into the bypass table: {stderr}");
+                }
+            }
+        }
+
+        // A default route through the physical gateway is the fallback for
+        // anything the main table does not cover.
         let out = tokio::process::Command::new("ip")
             .args([
                 "route",
-                "add",
+                "replace",
                 "default",
                 "via",
                 gateway,
@@ -176,7 +264,9 @@ impl TunManager {
             }
         }
 
-        info!("FWmark routing: mark {mark} -> table {table} via {gateway} dev {iface}");
+        info!(
+            "FWmark routing: mark {mark} -> table {table} ({copied} routes copied) via {gateway} dev {iface}"
+        );
         Ok(())
     }
 

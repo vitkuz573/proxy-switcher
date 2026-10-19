@@ -8,6 +8,14 @@ name = "ps-tun0"
 address = "10.0.0.1"
 mtu = 1500
 disable_ipv6 = true
+# Point the default route at the TUN device. Off by default: it changes how
+# the whole host reaches the internet, and the routing policy decides which
+# traffic a proxy applies to.
+default_route = false
+# Firewall mark for the daemon's own traffic, so it bypasses the TUN. Without
+# it the daemon's own connections — to the proxies it tests, to the sources it
+# scrapes — would be captured by the device it created.
+bypass_mark = 0x5053
 
 [scraper]
 enabled = true
@@ -42,15 +50,24 @@ timeout_secs = 5
 # How often a proxy known to work is re-checked.
 check_interval_secs = 600
 # Wait after each consecutive failure. The last entry applies to every further
-# failure, so a long-dead proxy is looked at a few times a day instead of on
-# every cycle.
+# failure, so a long-dead proxy is looked at a few times a day.
 failed_backoff_secs = [60, 300, 900, 3600, 10800, 21600]
-# An inconclusive probe proves nothing about the proxy, so it is retried sooner
-# than a real failure.
+# An inconclusive probe proves nothing, so it is retried sooner than a failure.
 inconclusive_backoff_secs = 300
-# A fast, highly available endpoint. The probe budget should be spent on the
-# proxy under test, not on the target.
-target_url = "http://example.com/"
+# Address echo services, tried in order. The probe needs the address the target
+# sees: that is the proof the request travelled through the proxy, and it is
+# also the address the traffic will leave from. An endpoint that merely answers
+# HTTP is not a proxy.
+#
+# More than one target, because a target is a third party: it can be blocked,
+# overloaded or down, and in some networks most of them are unreachable. The
+# engine verifies a target directly before using it, so an unreachable target
+# pauses the checks instead of marking the whole pool dead.
+target_urls = [
+    "http://icanhazip.com",
+    "http://api.ipify.org",
+    "http://ifconfig.me/ip",
+]
 max_consecutive_failures = 3
 # How long a proxy that has never worked is kept before it leaves the pool.
 unverified_ttl_secs = 3600
@@ -59,3 +76,25 @@ unverified_ttl_secs = 3600
 # Hard ceiling on the pool size. The least useful proxies are dropped first.
 max_proxies = 50000
 min_score = 0.0
+
+[routing]
+# Which traffic a proxy applies to.
+#
+# "none" routes nothing: a proxy is a tool for specific destinations, not a
+# default route for the whole host. One dead proxy would otherwise take the
+# host's internet access with it, including the daemon's own control traffic.
+#
+#   none       nothing goes through a proxy
+#   allowlist  only what matches the rules below
+#   denylist   everything except what matches the rules below
+mode = "none"
+# Address ranges, as "1.2.3.0/24" or a bare "1.2.3.4".
+cidrs = []
+# Hostnames or domain suffixes, as "example.com" or ".example.com".
+domains = []
+# Destination ports. Empty means every port.
+ports = []
+# Addresses that never go through a proxy, whatever the mode says. The proxy
+# itself belongs here: a connection to the proxy routed through a proxy is a
+# loop.
+always_direct = []

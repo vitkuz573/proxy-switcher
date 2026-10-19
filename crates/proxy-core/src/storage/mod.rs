@@ -48,6 +48,7 @@ impl Storage {
             ("consecutive_failures", "INTEGER NOT NULL DEFAULT 0"),
             ("first_seen", "TEXT"),
             ("next_probe_at", "TEXT"),
+            ("exit_ip", "TEXT"),
         ] {
             if !self.has_column("proxies", column)? {
                 self.conn.execute_batch(&format!(
@@ -73,8 +74,8 @@ impl Storage {
     pub fn save_proxies(&self, proxies: &[ProxyInfo]) -> Result<()> {
         let mut stmt = self.conn.prepare_cached(
             "INSERT OR REPLACE INTO proxies
-             (id, host, port, protocol, anonymity, latency_ms, country, score, last_checked, last_success, consecutive_failures, first_seen, next_probe_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             (id, host, port, protocol, anonymity, latency_ms, country, score, last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         )?;
 
         for p in proxies {
@@ -92,6 +93,7 @@ impl Storage {
                 p.consecutive_failures as i64,
                 p.first_seen.to_rfc3339(),
                 p.next_probe_at.to_rfc3339(),
+                p.exit_ip,
             ])?;
         }
         Ok(())
@@ -109,8 +111,8 @@ impl Storage {
 
         let mut stmt = tx.prepare_cached(
             "INSERT INTO proxies
-             (id, host, port, protocol, anonymity, latency_ms, country, score, last_checked, last_success, consecutive_failures, first_seen, next_probe_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             (id, host, port, protocol, anonymity, latency_ms, country, score, last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         )?;
 
         for p in proxies {
@@ -128,6 +130,7 @@ impl Storage {
                 p.consecutive_failures as i64,
                 p.first_seen.to_rfc3339(),
                 p.next_probe_at.to_rfc3339(),
+                p.exit_ip,
             ])?;
         }
 
@@ -140,7 +143,7 @@ impl Storage {
     pub fn load_proxies(&self) -> Result<Vec<ProxyInfo>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, host, port, protocol, anonymity, latency_ms, country, score,
-                    last_checked, last_success, consecutive_failures, first_seen, next_probe_at
+                    last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip
              FROM proxies",
         )?;
 
@@ -152,6 +155,7 @@ impl Storage {
             let last_success: Option<String> = row.get(9)?;
             let first_seen: Option<String> = row.get(11)?;
             let next_probe_at: Option<String> = row.get(12)?;
+            let exit_ip: Option<String> = row.get(13)?;
 
             Ok(ProxyInfo {
                 id: row.get(0)?,
@@ -172,6 +176,7 @@ impl Storage {
                 // A proxy restored without a schedule is due at once: it has
                 // not been probed under this schedule yet.
                 next_probe_at: parse_time(next_probe_at).unwrap_or_else(chrono::Utc::now),
+                exit_ip,
                 consecutive_failures: row.get::<_, Option<i64>>(10)?.unwrap_or(0).max(0) as u32,
                 score: row.get(7)?,
             })
@@ -210,6 +215,7 @@ mod tests {
             last_success,
             first_seen: chrono::Utc::now(),
             next_probe_at: chrono::Utc::now(),
+            exit_ip: None,
             consecutive_failures: 2,
             score: 0.75,
         }

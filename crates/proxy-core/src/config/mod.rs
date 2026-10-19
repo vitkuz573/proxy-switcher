@@ -1,3 +1,4 @@
+use crate::routing::RoutePolicy;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -8,6 +9,9 @@ pub struct Config {
     pub scraper: ScraperConfig,
     pub health: HealthConfig,
     pub pool: PoolConfig,
+    /// Which traffic a proxy applies to.
+    #[serde(default)]
+    pub routing: RoutePolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +27,22 @@ pub struct TunConfig {
     pub address: String,
     pub mtu: u16,
     pub disable_ipv6: bool,
+    /// Point the default route at the TUN device.
+    ///
+    /// Off by default: it changes how the whole host reaches the internet.
+    /// The routing policy decides which traffic a proxy applies to, and this
+    /// decides whether the device sees the traffic at all.
+    #[serde(default)]
+    pub default_route: bool,
+    /// Firewall mark for the daemon's own traffic.
+    ///
+    /// The daemon creates a TUN device and can point the default route at it.
+    /// Its own connections — to the proxies it tests, to the sources it
+    /// scrapes — would then be captured by that device and routed through a
+    /// proxy, which is a loop, and which takes the daemon offline the moment
+    /// the active proxy dies. Marked traffic bypasses the device.
+    #[serde(default = "default_bypass_mark")]
+    pub bypass_mark: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,7 +78,14 @@ pub struct HealthConfig {
     /// Wait before retrying a proxy whose probe was inconclusive.
     #[serde(default = "default_inconclusive_backoff")]
     pub inconclusive_backoff_secs: u64,
-    pub target_url: String,
+    /// Probe targets, tried in order.
+    ///
+    /// The target is a third party: it can be blocked, overloaded or down, and
+    /// in some networks most of them are unreachable. More than one, and the
+    /// engine verifies a target directly before using it, so an unreachable
+    /// target never marks the pool dead.
+    #[serde(default = "default_probe_targets")]
+    pub target_urls: Vec<String>,
     /// Consecutive failed probes a proxy survives before it leaves the pool.
     #[serde(default = "default_failure_threshold")]
     pub max_consecutive_failures: u32,
@@ -69,6 +96,18 @@ pub struct HealthConfig {
 
 fn default_failure_threshold() -> u32 {
     3
+}
+
+fn default_probe_targets() -> Vec<String> {
+    vec![
+        "http://icanhazip.com".to_string(),
+        "http://api.ipify.org".to_string(),
+        "http://ifconfig.me/ip".to_string(),
+    ]
+}
+
+fn default_bypass_mark() -> u32 {
+    crate::net::ENGINE_MARK
 }
 
 fn default_concurrency() -> usize {
@@ -112,6 +151,8 @@ impl Default for Config {
                 address: "10.0.0.1".into(),
                 mtu: 1500,
                 disable_ipv6: true,
+                default_route: false,
+                bypass_mark: default_bypass_mark(),
             },
             scraper: ScraperConfig {
                 enabled: true,
@@ -132,14 +173,15 @@ impl Default for Config {
                 // public proxy that works now usually still works in ten
                 // minutes, and the streak counter handles genuine decay.
                 check_interval_secs: 600,
-                // A fast, highly available endpoint. The previous target was
-                // a public API that is frequently overloaded, and every probe
-                // waited on it: the exchange budget was spent on the target
-                // rather than on the proxy being tested.
-                target_url: "http://example.com/".into(),
+                // Address echo services. The probe needs the address the
+                // target sees, because that is the proof that the request
+                // travelled through the proxy: an endpoint that answers HTTP
+                // is not a proxy, and only the address tells them apart.
+                target_urls: default_probe_targets(),
                 max_consecutive_failures: default_failure_threshold(),
                 unverified_ttl_secs: default_unverified_ttl(),
             },
+            routing: RoutePolicy::default(),
             pool: PoolConfig {
                 max_proxies: 1000,
                 min_score: 0.0,

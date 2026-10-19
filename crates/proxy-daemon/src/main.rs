@@ -69,12 +69,59 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // The daemon's own traffic bypasses the TUN it created.
+    //
+    // Without this the connections it makes — to the proxies it tests, to the
+    // sources it scrapes — are captured by the device and routed through the
+    // active proxy. That is a loop, and when the proxy dies the daemon can no
+    // longer scrape or check anything to recover.
+    let bypass_mark = config.tun.bypass_mark;
+
+    // Which traffic a proxy applies to. The default routes nothing: a proxy
+    // is a tool for specific destinations, not a default route for the host.
+    let route_policy = config.routing.clone();
+
     // Initialize TUN
     let tun = TunManager::new(config.tun.clone());
     let tun_ok = tun.create().await.is_ok();
 
+    // The gateway has to be read before the default route is moved, or there
+    // is nothing left to point the bypass table at.
+    let gateway = tun.detect_gateway().await.ok();
+
+    if tun_ok {
+        if let Some((gateway, iface)) = gateway.as_ref() {
+            // Marked traffic — everything the daemon itself opens — goes
+            // straight out through the real gateway instead of into the
+            // device. This is what keeps the daemon reachable when the
+            // proxy it is testing is the thing that broke.
+            if let Err(e) = TunManager::setup_fwmark_routing(
+                gateway,
+                iface,
+                proxy_core::net::ENGINE_TABLE,
+                bypass_mark,
+            )
+            .await
+            {
+                warn!("Could not set up the bypass routing table: {e}");
+            }
+        }
+
+        // The default route is only moved when the operator asks for it: it
+        // changes how the whole host reaches the internet.
+        if config.tun.default_route {
+            if let Err(e) = tun.set_default_route().await {
+                error!("Could not point the default route at the TUN: {e}");
+            }
+        }
+    }
+
     // Take device and start forwarding loop
-    let router = Arc::new(Router::new(pool.clone()));
+    let router = Arc::new(Router::with_policy(
+        pool.clone(),
+        route_policy.clone(),
+        Some(bypass_mark),
+    ));
 
     if tun_ok {
         if let Some(dev) = tun.take_device().await {
@@ -92,7 +139,8 @@ async fn main() -> anyhow::Result<()> {
         config.health.concurrency,
         config.health.timeout_secs,
         config.health.connect_timeout_secs,
-        config.health.target_url.clone(),
+        config.health.target_urls.clone(),
+        Some(bypass_mark),
     ));
 
     // Shared state for API
@@ -126,6 +174,9 @@ async fn main() -> anyhow::Result<()> {
         check_progress: check_progress.clone(),
         check_in_flight: check_in_flight.clone(),
         eviction_policy,
+        route_policy: route_policy.clone(),
+        bypass_mark,
+        default_route: config.tun.default_route,
         probe_schedule: probe_schedule.clone(),
     };
 
@@ -243,18 +294,48 @@ async fn main() -> anyhow::Result<()> {
                             // Stream each result into the pool as it arrives, so
                             // confirmed proxies become routable during the batch
                             // instead of only once the last probe finishes.
+                            // The reasons are counted as well as the verdicts:
+                            // a batch where everything fails at once is a
+                            // problem with the probe path, not with thousands
+                            // of proxies, and the difference is only visible
+                            // in the reasons.
+                            let reasons: Arc<
+                                std::sync::Mutex<std::collections::HashMap<String, usize>>,
+                            > = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+
                             let counts = {
                                 let pc = pc.clone();
+                                let reasons = reasons.clone();
                                 hc.check_batch(&due, batch_progress, move |result| {
                                     let pc = pc.clone();
+                                    let reasons = reasons.clone();
                                     let schedule = batch_schedule.clone();
                                     async move {
+                                        if let Some(reason) = result.error.as_ref() {
+                                            if let Ok(mut map) = reasons.lock() {
+                                                let key = reason
+                                                    .split("connect error")
+                                                    .next()
+                                                    .map(|_| reason.to_string())
+                                                    .unwrap_or_else(|| reason.to_string());
+                                                let key: String = key.chars().take(70).collect();
+                                                *map.entry(key).or_default() += 1;
+                                            }
+                                        }
                                         pc.apply_health_result(&result, batch_policy, &schedule)
                                             .await;
                                     }
                                 })
                                 .await
                             };
+
+                            if let Ok(map) = reasons.lock() {
+                                let mut ranked: Vec<(&String, &usize)> = map.iter().collect();
+                                ranked.sort_by_key(|(_, count)| std::cmp::Reverse(**count));
+                                for (reason, count) in ranked.iter().take(6) {
+                                    warn!(reason = %reason, count, "probe failure reason");
+                                }
+                            }
 
                             batch_in_flight.store(false, std::sync::atomic::Ordering::SeqCst);
 

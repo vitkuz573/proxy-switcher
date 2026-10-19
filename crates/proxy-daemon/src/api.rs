@@ -10,6 +10,7 @@ use proxy_core::health::HealthChecker;
 use proxy_core::pool::{EvictionPolicy, ProbeSchedule, ProxyPool};
 use proxy_core::proxy::{Anonymity, ProxyInfo, ProxyProtocol};
 use proxy_core::router::Router as ProxyRouter;
+use proxy_core::routing::RoutePolicy;
 use proxy_core::scraper::Scraper;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -83,6 +84,12 @@ pub struct AppState {
     pub check_in_flight: Arc<std::sync::atomic::AtomicBool>,
     /// When a proxy may be evicted, shared by every path that applies results.
     pub eviction_policy: EvictionPolicy,
+    /// Which traffic a proxy applies to.
+    pub route_policy: RoutePolicy,
+    /// The firewall mark the daemon's own traffic carries.
+    pub bypass_mark: u32,
+    /// Whether the default route points at the TUN device.
+    pub default_route: bool,
     /// Per-proxy probe schedule, shared by every path that applies results.
     pub probe_schedule: ProbeSchedule,
 }
@@ -93,6 +100,21 @@ pub struct AppState {
 struct Source {
     id: String,
     url: String,
+}
+
+/// The routing policy in force, and the state of the TUN bypass.
+#[derive(Serialize)]
+struct RoutingInfo {
+    /// The policy as configured.
+    policy: RoutePolicy,
+    /// Whether the policy routes anything at all.
+    enabled: bool,
+    /// The firewall mark the daemon's own traffic carries.
+    bypass_mark: u32,
+    /// Whether the default route points at the TUN device.
+    default_route: bool,
+    /// The address of the active proxy, if one is selected.
+    active_proxy: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -210,6 +232,7 @@ impl IntoResponse for ApiError {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/summary", get(get_summary))
+        .route("/api/v1/routing", get(get_routing))
         .route("/api/v1/stats", get(get_stats))
         .route("/api/v1/dns", get(get_dns))
         // Proxies
@@ -243,6 +266,19 @@ async fn get_summary(State(state): State<AppState>) -> Json<Summary> {
         pool_size: state.pool.len().await,
         healthy_count: state.pool.healthy_count().await,
         active_proxy: state.pool.active().await,
+    })
+}
+
+async fn get_routing(State(state): State<AppState>) -> Json<RoutingInfo> {
+    let policy = state.route_policy.clone();
+    let enabled = policy.is_enabled();
+
+    Json(RoutingInfo {
+        enabled,
+        policy,
+        bypass_mark: state.bypass_mark,
+        default_route: state.default_route,
+        active_proxy: state.pool.active().await.map(|p| p.id),
     })
 }
 
@@ -337,6 +373,7 @@ async fn create_proxy(State(state): State<AppState>, Json(input): Json<AddProxyI
         last_success: None,
         first_seen: chrono::Utc::now(),
         next_probe_at: chrono::Utc::now(),
+        exit_ip: None,
         consecutive_failures: 0,
         score: 0.0,
     };

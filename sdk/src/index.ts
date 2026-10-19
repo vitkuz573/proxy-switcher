@@ -5,6 +5,7 @@ import type {
   Problem,
   ProxyProtocol,
   ProxyRecord,
+  RoutingInfo,
   ScrapeRun,
   Source,
   Stats,
@@ -275,6 +276,11 @@ export class ProxySwitcherClient {
 
   getStats(): Promise<Stats> {
     return this.request("GET", "/api/v1/stats");
+  }
+
+  /** The routing policy in force, and the state of the TUN bypass. */
+  getRouting(): Promise<RoutingInfo> {
+    return this.request("GET", "/api/v1/routing");
   }
 
   listAuditEvents(page: ListPage = {}): Promise<AuditEvent[]> {

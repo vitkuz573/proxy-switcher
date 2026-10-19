@@ -58,6 +58,7 @@ class FakeEngine {
         last_success: null,
         consecutive_failures: 0,
         score: 0,
+        exit_ip: null,
       };
       this.proxies.set(record.id, record);
       return json(record, 201);
@@ -96,6 +97,7 @@ class FakeEngine {
       last_success: null,
       consecutive_failures: 0,
       score: 0,
+      exit_ip: null,
     });
     return id;
   }

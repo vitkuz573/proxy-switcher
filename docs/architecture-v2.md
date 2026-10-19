@@ -172,6 +172,83 @@ The remaining levers are ordinary: probes run concurrently (500 by default),
 the handshake gets a short budget of its own so dead proxies are not waited out
 at full length, and the probe target is a fast, highly available endpoint.
 
+## What counts as a working proxy
+
+The pool was full of entries that answered HTTP and were therefore called
+working, while being useless for the one thing the engine does: carrying a
+TCP stream through a tunnel.
+
+A proxy is now only working if all of this holds:
+
+- the tunnel to the target was established — a CONNECT for HTTP proxies, the
+  SOCKS handshake for the others;
+- the target answered with a success status;
+- the target reported a source address, and that address is not the engine's
+  own.
+
+That last point is the one that matters. The address the target sees is the
+address the traffic leaves from, so it is the proof that the request really
+travelled through the proxy. An endpoint that merely answers HTTP, a captive
+portal, or a proxy that serves its own error page instead of tunnelling all
+fail it. The address is recorded per proxy and shown in the console, which
+also makes it visible when many entries share one exit.
+
+**Failures are separated by whose fault they are.** A refused connection, a
+rejected CONNECT or a non-HTTP answer is the proxy's fault, and the proxy is
+condemned. A timeout, or a target that answered with an error, is not
+evidence against the proxy: the tunnel was established, so the proxy did its
+job, and the target may be down, overloaded or blocking this network. Counting
+those as failures condemns the entire pool whenever a third-party service has
+a bad day.
+
+For the same reason the probe target is chosen carefully. It is a third
+party, and in some networks most of them are unreachable, so there are
+several, and the engine verifies one directly before using it. The batch
+still runs when none of them answer — the proxies are on other networks, and a
+target that is blocked here may be perfectly reachable through one. A target
+that is genuinely down produces inconclusive verdicts, which change nothing in
+the pool. The failure mode this avoids is the worst one: an unreachable probe
+target emptying a pool of fifteen thousand good proxies.
+
+## Which traffic a proxy applies to
+
+A proxy is a tool for specific destinations, not a default route for the whole
+host. The `[routing]` section says which:
+
+```toml
+[routing]
+mode = "none"        # none | allowlist | denylist
+cidrs = ["1.2.3.0/24"]
+domains = ["example.com"]
+ports = [443]
+always_direct = ["8.8.8.8"]
+```
+
+`none` is the default and routes nothing. A proxy that is selected for every
+connection is a single point of failure: when it dies, everything routed
+through it dies with it, including the daemon's own control traffic.
+
+Local addresses never go through a proxy whatever the mode says, and neither
+does the proxy itself — a connection to the proxy that is routed through a
+proxy is a loop.
+
+### Keeping the daemon out of its own device
+
+The daemon creates a TUN device and can point the default route at it. Its own
+connections — to the proxies it tests, to the sources it scrapes — would then
+be captured by that device and routed through the active proxy, which is a
+loop, and which takes the daemon offline the moment the active proxy dies.
+
+Its sockets therefore carry a firewall mark, and the marked traffic follows a
+copy of the main routing table rather than the device. The copy matters: the
+main table is where an installed VPN keeps its routes, and a bypass table
+with a single route through the physical gateway would send the daemon's
+traffic around the VPN as well, losing the very endpoints it has to reach.
+
+Moving the default route at the device is a separate, explicit decision
+(`tun.default_route`), because it changes how the whole host reaches the
+internet.
+
 ## Migration order
 
 Each step is independently verifiable and leaves the system running.

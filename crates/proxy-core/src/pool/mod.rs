@@ -309,6 +309,11 @@ impl ProxyPool {
                 proxy.last_checked = Some(now);
                 proxy.last_success = Some(now);
                 proxy.consecutive_failures = 0;
+                // The address the traffic leaves from. Many proxy entries share
+                // one exit address, and seeing it makes that visible.
+                if let Some(exit_ip) = result.exit_ip {
+                    proxy.exit_ip = Some(exit_ip.to_string());
+                }
                 // A working proxy is re-checked on the normal interval.
                 proxy.next_probe_at =
                     now + chrono::Duration::seconds(schedule.working_interval_secs as i64);
@@ -559,6 +564,7 @@ mod tests {
             last_success: None,
             first_seen: chrono::Utc::now(),
             next_probe_at: chrono::Utc::now(),
+            exit_ip: None,
             consecutive_failures: 0,
             score: 0.0,
         }
@@ -566,7 +572,7 @@ mod tests {
 
     fn result(id: &str, alive: bool, latency: u64) -> HealthResult {
         if alive {
-            HealthResult::working(id, latency)
+            HealthResult::working(id, latency, None)
         } else {
             HealthResult::failed(id, "refused")
         }
@@ -794,6 +800,7 @@ mod tests {
             last_success: confirmed.then_some(now),
             first_seen: chrono::Utc::now(),
             next_probe_at: chrono::Utc::now(),
+            exit_ip: None,
             consecutive_failures: 0,
             score: 0.9,
         };
@@ -832,6 +839,7 @@ mod tests {
             last_success: Some(now),
             first_seen: chrono::Utc::now(),
             next_probe_at: chrono::Utc::now(),
+            exit_ip: None,
             consecutive_failures: 0,
             score: 0.5,
         };
@@ -865,6 +873,7 @@ mod tests {
             last_success: None,
             first_seen: chrono::Utc::now() - chrono::Duration::seconds(7200),
             next_probe_at: chrono::Utc::now(),
+            exit_ip: None,
             consecutive_failures: 0,
             score: 0.0,
         };
@@ -878,6 +887,7 @@ mod tests {
             proxy_id: stale.id.clone(),
             verdict: Verdict::Failed,
             latency_ms: 0,
+            exit_ip: None,
             error: None,
         };
 
@@ -901,6 +911,7 @@ mod tests {
             proxy_id: stale.id.clone(),
             verdict: Verdict::Failed,
             latency_ms: 0,
+            exit_ip: None,
             error: None,
         };
         assert!(
@@ -999,6 +1010,7 @@ mod tests {
             proxy_id: "a".to_string(),
             verdict: Verdict::Inconclusive,
             latency_ms: 0,
+            exit_ip: None,
             error: None,
         };
         pool.apply_health_result(&inconclusive, policy, &schedule)

@@ -5,8 +5,9 @@ use crate::dns::DnsCache;
 use crate::forwarder::Forwarder;
 use crate::packet::{build_tcp_packet, build_udp_packet, ParsedPacket};
 use crate::pool::ProxyPool;
+use crate::routing::{Decision, RoutePolicy};
 use connection::{ConnectionTracker, FlowKey, TcpState};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, warn};
@@ -17,6 +18,14 @@ pub struct Router {
     udp_tracker: UdpTracker,
     pool: Arc<ProxyPool>,
     dns_cache: Arc<DnsCache>,
+    /// Which destinations go through a proxy.
+    policy: RoutePolicy,
+    /// Firewall mark for the sockets the router opens.
+    ///
+    /// The router's own connection to the proxy must not re-enter the TUN: a
+    /// connection to the proxy that is itself routed through a proxy is a
+    /// loop, and it is how the engine takes itself offline.
+    mark: Option<u32>,
 }
 
 impl Router {
@@ -26,7 +35,25 @@ impl Router {
             udp_tracker: UdpTracker::new(),
             pool,
             dns_cache: Arc::new(DnsCache::new()),
+            policy: RoutePolicy::default(),
+            mark: None,
         }
+    }
+
+    /// Build a router with an explicit routing policy and socket mark.
+    pub fn with_policy(pool: Arc<ProxyPool>, policy: RoutePolicy, mark: Option<u32>) -> Self {
+        Self {
+            tracker: ConnectionTracker::new(),
+            udp_tracker: UdpTracker::new(),
+            pool,
+            dns_cache: Arc::new(DnsCache::new()),
+            policy,
+            mark,
+        }
+    }
+
+    pub fn policy(&self) -> &RoutePolicy {
+        &self.policy
     }
 
     pub fn with_dns_cache(pool: Arc<ProxyPool>, dns_cache: Arc<DnsCache>) -> Self {
@@ -35,6 +62,8 @@ impl Router {
             udp_tracker: UdpTracker::new(),
             pool,
             dns_cache,
+            policy: RoutePolicy::default(),
+            mark: None,
         }
     }
 
@@ -44,6 +73,8 @@ impl Router {
             udp_tracker: UdpTracker::with_fwmark(fwmark),
             pool,
             dns_cache: Arc::new(DnsCache::new()),
+            policy: RoutePolicy::default(),
+            mark: Some(fwmark),
         }
     }
 
@@ -89,14 +120,6 @@ impl Router {
             ));
         }
 
-        let proxy = match self.pool.active().await {
-            Some(p) => p,
-            None => {
-                warn!("No active proxy");
-                return None;
-            }
-        };
-
         // Use hostname from DNS cache if available, fall back to IP
         let target_host = self
             .dns_cache
@@ -104,12 +127,41 @@ impl Router {
             .await
             .unwrap_or_else(|| key.dst_ip.to_string());
 
+        // Which traffic a proxy applies to. The default routes nothing, so a
+        // proxy is an opt-in for specific destinations rather than a default
+        // route for the whole host.
+        let decision = self.policy.decide(
+            IpAddr::V4(key.dst_ip),
+            key.dst_port,
+            Some(target_host.as_str()),
+        );
+
+        // The proxy's own address is never routed through the proxy.
+        let proxy = match decision {
+            Decision::Direct => None,
+            Decision::Proxy => self.pool.active().await,
+        };
+
+        if decision == Decision::Proxy && proxy.is_none() {
+            // No proxy is available. Going direct is better than dropping the
+            // connection: the whole point of scoping the policy is that the
+            // rest of the host keeps working.
+            warn!("No active proxy for {target_host}, going direct");
+        }
+
         debug!(
             "New conn: {}:{} -> {}:{} (target={})",
             key.src_ip, key.src_port, key.dst_ip, key.dst_port, target_host
         );
 
-        match Forwarder::connect_to(&proxy, &target_host, key.dst_port).await {
+        let connection = match proxy {
+            Some(proxy) => {
+                Forwarder::connect_to(&proxy, &target_host, key.dst_port, self.mark).await
+            }
+            None => Forwarder::connect_direct(&target_host, key.dst_port, self.mark).await,
+        };
+
+        match connection {
             Ok(conn) => {
                 let server_isn = rand::random::<u32>();
                 let client_isn = tcp.sequence_number;

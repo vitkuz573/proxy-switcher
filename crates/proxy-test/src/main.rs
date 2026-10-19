@@ -19,6 +19,7 @@ async fn main() {
         last_success: None,
         first_seen: chrono::Utc::now(),
         next_probe_at: chrono::Utc::now(),
+        exit_ip: None,
         consecutive_failures: 0,
         score: 0.0,
     };
@@ -28,7 +29,7 @@ async fn main() {
         proxy.host, proxy.port
     );
 
-    match Forwarder::connect_to(&proxy, "httpbin.org", 80).await {
+    match Forwarder::connect_to(&proxy, "example.com", 80, None).await {
         Ok(mut conn) => {
             let request = b"GET /ip HTTP/1.1\r\nHost: httpbin.org\r\nConnection: close\r\n\r\n";
             if let Err(e) = conn.write_all(request).await {
@@ -58,7 +59,7 @@ async fn main() {
     }
 
     println!("\n=== Direct connection (no proxy) ===");
-    match Forwarder::connect_direct("httpbin.org", 80).await {
+    match Forwarder::connect_direct("example.com", 80, None).await {
         Ok(mut conn) => {
             let request = b"GET /ip HTTP/1.1\r\nHost: httpbin.org\r\nConnection: close\r\n\r\n";
             if let Err(e) = conn.write_all(request).await {

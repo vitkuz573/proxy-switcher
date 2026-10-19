@@ -46,6 +46,8 @@ export const ProxyRecordSchema = Type.Object(
     last_success: Type.Union([Type.String(), Type.Null()]),
     consecutive_failures: Type.Integer(),
     score: Type.Number(),
+    /** The address traffic left from, as the target reported it. */
+    exit_ip: Type.Union([Type.String(), Type.Null()]),
   },
   { $id: "Proxy" },
 );
@@ -157,6 +159,36 @@ export const AuditEventSchema = Type.Object(
 );
 export type AuditEvent = Static<typeof AuditEventSchema>;
 
+/**
+ * Which traffic a proxy applies to.
+ *
+ * The default routes nothing: a proxy is a tool for specific destinations,
+ * not a default route for the whole host.
+ */
+export const RoutingPolicySchema = Type.Object(
+  {
+    mode: Type.Union([Type.Literal("none"), Type.Literal("allowlist"), Type.Literal("denylist")]),
+    cidrs: Type.Array(Type.String()),
+    domains: Type.Array(Type.String()),
+    ports: Type.Array(Type.Integer()),
+    always_direct: Type.Array(Type.String()),
+  },
+  { $id: "RoutingPolicy" },
+);
+export type RoutingPolicy = Static<typeof RoutingPolicySchema>;
+
+export const RoutingInfoSchema = Type.Object(
+  {
+    policy: RoutingPolicySchema,
+    enabled: Type.Boolean(),
+    bypass_mark: Type.Integer(),
+    default_route: Type.Boolean(),
+    active_proxy: Type.Union([Type.String(), Type.Null()]),
+  },
+  { $id: "RoutingInfo" },
+);
+export type RoutingInfo = Static<typeof RoutingInfoSchema>;
+
 /** RFC 9457 problem document. The single error shape for the whole API. */
 export const ProblemSchema = Type.Object(
   {
@@ -187,6 +219,8 @@ export const SCHEMAS = {
   CreatedApiToken: CreatedApiTokenSchema,
   TokenExchange: TokenExchangeSchema,
   AuditEvent: AuditEventSchema,
+  RoutingPolicy: RoutingPolicySchema,
+  RoutingInfo: RoutingInfoSchema,
   Problem: ProblemSchema,
 } as const;
 

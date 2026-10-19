@@ -38,6 +38,7 @@ fn main() {
             last_success: None,
             first_seen: chrono::Utc::now(),
             next_probe_at: chrono::Utc::now(),
+            exit_ip: None,
             consecutive_failures: 0,
             score: 100.0,
         };
@@ -51,6 +52,8 @@ fn main() {
             address: TUN_ADDR.into(),
             mtu: 1500,
             disable_ipv6: true,
+            default_route: false,
+            bypass_mark: 0x5053,
         });
         let (gateway, iface) = mgr_temp
             .detect_gateway()
@@ -73,6 +76,8 @@ fn main() {
             address: TUN_ADDR.into(),
             mtu: 1500,
             disable_ipv6: true,
+            default_route: false,
+            bypass_mark: 0x5053,
         });
         mgr.create().await.expect("TUN create failed");
 
