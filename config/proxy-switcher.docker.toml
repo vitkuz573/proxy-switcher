@@ -15,13 +15,32 @@ interval_secs = 300
 sources = []
 
 [health]
+# The batch is I/O bound, so this is the main throughput lever.
 concurrency = 500
+# Budget for the proxy handshake. A proxy that will not complete a handshake
+# is dead, and dead proxies are the majority of the pool, so the batch spent
+# most of its time waiting out the full timeout on endpoints that never
+# answer.
+connect_timeout_secs = 3
+# Budget for the request and response exchange.
 timeout_secs = 5
-check_interval_secs = 60
-target_url = "http://httpbin.org/ip"
+# How often a proxy known to work is re-checked.
+check_interval_secs = 600
+# Wait after each consecutive failure. The last entry applies to every further
+# failure, so a long-dead proxy is looked at a few times a day instead of on
+# every cycle.
+failed_backoff_secs = [60, 300, 900, 3600, 10800, 21600]
+# An inconclusive probe proves nothing about the proxy, so it is retried sooner
+# than a real failure.
+inconclusive_backoff_secs = 300
+# A fast, highly available endpoint. The probe budget should be spent on the
+# proxy under test, not on the target.
+target_url = "http://example.com/"
+max_consecutive_failures = 3
+# How long a proxy that has never worked is kept before it leaves the pool.
+unverified_ttl_secs = 3600
 
 [pool]
-max_proxies = 1000
+# Hard ceiling on the pool size. The least useful proxies are dropped first.
+max_proxies = 50000
 min_score = 0.0
-auto_rotate = false
-rotate_interval_secs = 120

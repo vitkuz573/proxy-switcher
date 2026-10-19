@@ -1,6 +1,6 @@
 use crate::health::{HealthResult, Verdict};
 use crate::proxy::ProxyInfo;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -33,6 +33,55 @@ struct PoolInner {
     proxies: Vec<ProxyInfo>,
     index: HashMap<String, usize>,
     active_index: Option<usize>,
+    /// Proxies the eviction policy has condemned but not yet removed.
+    ///
+    /// Removal rebuilds the whole index, so doing it per condemned proxy turns
+    /// a batch with thousands of evictions into thousands of full rebuilds.
+    /// They are collected here and applied in one pass at the end of the batch.
+    pending_eviction: HashSet<String>,
+}
+
+/// When each proxy should be probed again.
+///
+/// The pool is scheduled per proxy, not per cycle. Re-probing the whole
+/// unverified set on every cycle made the batch size equal the pool size, and
+/// the pool grew with every scrape — so the time spent checking grew with it
+/// too. With a backoff, a proxy that has just failed is looked at again
+/// shortly, and one that has been dead for a week is looked at a few times a
+/// day.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeSchedule {
+    /// How often a proxy known to work is re-checked.
+    pub working_interval_secs: u64,
+    /// Wait after each consecutive failure, in seconds. The last entry applies
+    /// to every further failure.
+    pub failed_backoff_secs: Vec<u64>,
+    /// Wait before retrying a proxy whose probe was inconclusive. Shorter than
+    /// the failure backoff: an inconclusive probe says nothing about the
+    /// proxy, so it deserves an early second look.
+    pub inconclusive_backoff_secs: u64,
+}
+
+impl Default for ProbeSchedule {
+    fn default() -> Self {
+        Self {
+            working_interval_secs: 600,
+            failed_backoff_secs: vec![60, 300, 900, 3600, 10_800, 21_600],
+            inconclusive_backoff_secs: 300,
+        }
+    }
+}
+
+impl ProbeSchedule {
+    /// Wait before probing a proxy that has failed this many times in a row.
+    pub fn failed_backoff(&self, failures: u32) -> u64 {
+        let index = failures.saturating_sub(1) as usize;
+        self.failed_backoff_secs
+            .get(index)
+            .copied()
+            .or_else(|| self.failed_backoff_secs.last().copied())
+            .unwrap_or(3600)
+    }
 }
 
 /// Why a batch removed proxies, for logging. Pool contents change constantly
@@ -91,6 +140,64 @@ impl ProxyPool {
         added
     }
 
+    /// Keep the pool within its configured capacity.
+    ///
+    /// The capacity was a configuration field that nothing enforced, so the
+    /// pool grew without bound. The working set is kept and the least useful
+    /// proxies are dropped: unverified ones first, then the slowest.
+    pub async fn enforce_capacity(&self, max_proxies: usize) -> usize {
+        let mut inner = self.inner.write().await;
+
+        if inner.proxies.len() <= max_proxies {
+            return 0;
+        }
+
+        let overflow = inner.proxies.len() - max_proxies;
+
+        // Rank by usefulness: confirmed first, then by latency, then by score.
+        let mut order: Vec<usize> = (0..inner.proxies.len()).collect();
+        order.sort_by(|&a, &b| {
+            let pa = &inner.proxies[a];
+            let pb = &inner.proxies[b];
+            pb.last_success
+                .cmp(&pa.last_success)
+                .then_with(|| pa.latency_ms.cmp(&pb.latency_ms))
+                .then_with(|| {
+                    pb.score
+                        .partial_cmp(&pa.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+
+        let doomed: HashSet<String> = order
+            .into_iter()
+            .take(overflow)
+            .map(|i| inner.proxies[i].id.clone())
+            .collect();
+
+        let removed = doomed.len();
+        self.retain(&mut inner, |p| !doomed.contains(&p.id));
+        removed
+    }
+
+    /// Remove every proxy condemned since the last sweep, in one pass.
+    ///
+    /// Eviction is deferred to here because removal rebuilds the id index: a
+    /// sweep per condemned proxy would mean thousands of full rebuilds in one
+    /// batch, each of them holding the write lock.
+    pub async fn evict_pending(&self) -> usize {
+        let mut inner = self.inner.write().await;
+
+        if inner.pending_eviction.is_empty() {
+            return 0;
+        }
+
+        let condemned = std::mem::take(&mut inner.pending_eviction);
+        let count = condemned.len();
+        self.retain(&mut inner, |p| !condemned.contains(&p.id));
+        count
+    }
+
     /// Insert records exactly as they are, preserving their health state.
     ///
     /// `merge` is for discovery: a freshly scraped proxy genuinely has no known
@@ -119,6 +226,30 @@ impl ProxyPool {
             "pool restored from storage"
         );
         added
+    }
+
+    /// Proxies that are due for a probe right now.
+    ///
+    /// This is the set the health checker works on. It is bounded by the
+    /// schedule rather than by the pool size: proxies that are not due are
+    /// skipped entirely rather than re-probed and re-deferred.
+    pub async fn due_for_check(&self, now: chrono::DateTime<chrono::Utc>) -> Vec<ProxyInfo> {
+        let inner = self.inner.read().await;
+        inner
+            .proxies
+            .iter()
+            .filter(|p| p.next_probe_at <= now)
+            .cloned()
+            .collect()
+    }
+
+    /// When the next proxy comes due.
+    ///
+    /// Reported so the operator can see when the pool will be busy again
+    /// instead of wondering why a cycle produced nothing.
+    pub async fn next_due_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        let inner = self.inner.read().await;
+        inner.proxies.iter().map(|p| p.next_probe_at).min()
     }
 
     /// Proxies that have never been proven to work. These are what a scrape
@@ -157,7 +288,12 @@ impl ProxyPool {
     /// reporting zero working proxies for the entire run.
     ///
     /// Returns true when the proxy was evicted.
-    pub async fn apply_health_result(&self, result: &HealthResult, policy: EvictionPolicy) -> bool {
+    pub async fn apply_health_result(
+        &self,
+        result: &HealthResult,
+        policy: EvictionPolicy,
+        schedule: &ProbeSchedule,
+    ) -> bool {
         let now = chrono::Utc::now();
         let mut inner = self.inner.write().await;
 
@@ -173,13 +309,20 @@ impl ProxyPool {
                 proxy.last_checked = Some(now);
                 proxy.last_success = Some(now);
                 proxy.consecutive_failures = 0;
+                // A working proxy is re-checked on the normal interval.
+                proxy.next_probe_at =
+                    now + chrono::Duration::seconds(schedule.working_interval_secs as i64);
                 false
             }
 
             // The probe proved nothing, so leave the streak, the score and
-            // `last_success` exactly as they were.
+            // `last_success` exactly as they were. It is retried sooner than a
+            // real failure, because nothing was actually proven against it.
             Verdict::Inconclusive => {
-                inner.proxies[i].last_checked = Some(now);
+                let proxy = &mut inner.proxies[i];
+                proxy.last_checked = Some(now);
+                proxy.next_probe_at =
+                    now + chrono::Duration::seconds(schedule.inconclusive_backoff_secs as i64);
                 false
             }
 
@@ -205,9 +348,16 @@ impl ProxyPool {
                 let stale_unverified =
                     never_worked && unverified_age >= policy.unverified_ttl_secs as i64 as u64;
 
+                // Back off before deciding: a proxy that has just failed is
+                // not due again for a while, so the next cycle skips it.
+                proxy.next_probe_at = now
+                    + chrono::Duration::seconds(
+                        schedule.failed_backoff(proxy.consecutive_failures) as i64,
+                    );
+
                 if exhausted || stale_unverified {
                     let id = proxy.id.clone();
-                    self.retain(&mut inner, |p| p.id != id);
+                    inner.pending_eviction.insert(id);
                     return true;
                 }
                 false
@@ -224,6 +374,7 @@ impl ProxyPool {
         &self,
         results: Vec<HealthResult>,
         policy: EvictionPolicy,
+        schedule: &ProbeSchedule,
     ) -> BatchOutcome {
         let mut outcome = BatchOutcome {
             checked: results.len(),
@@ -236,7 +387,7 @@ impl ProxyPool {
                 Verdict::Failed => outcome.failed += 1,
                 Verdict::Inconclusive => outcome.inconclusive += 1,
             }
-            if self.apply_health_result(result, policy).await {
+            if self.apply_health_result(result, policy, schedule).await {
                 outcome.evicted += 1;
             }
         }
@@ -407,6 +558,7 @@ mod tests {
             last_checked: None,
             last_success: None,
             first_seen: chrono::Utc::now(),
+            next_probe_at: chrono::Utc::now(),
             consecutive_failures: 0,
             score: 0.0,
         }
@@ -430,8 +582,12 @@ mod tests {
         pool.merge(vec![proxy("a"), proxy("b")]).await;
 
         let policy = EvictionPolicy::default();
-        pool.apply_health_results(vec![result("a", true, 100), result("b", false, 0)], policy)
-            .await;
+        pool.apply_health_results(
+            vec![result("a", true, 100), result("b", false, 0)],
+            policy,
+            &ProbeSchedule::default(),
+        )
+        .await;
 
         assert_eq!(pool.len().await, 2, "one failure must not remove a proxy");
         assert_eq!(pool.healthy_count().await, 1);
@@ -444,8 +600,15 @@ mod tests {
 
         let policy = EvictionPolicy::default();
         for _ in 0..policy.max_consecutive_failures {
-            pool.apply_health_results(vec![result("a", true, 100), result("b", false, 0)], policy)
-                .await;
+            pool.apply_health_results(
+                vec![result("a", true, 100), result("b", false, 0)],
+                policy,
+                &ProbeSchedule::default(),
+            )
+            .await;
+            // Removal is deferred to a single sweep, so the streak is
+            // accumulated across batches exactly as it is in production.
+            pool.evict_pending().await;
         }
 
         assert_eq!(pool.len().await, 1);
@@ -458,14 +621,30 @@ mod tests {
         pool.merge(vec![proxy("a")]).await;
 
         let policy = EvictionPolicy::default();
-        pool.apply_health_results(vec![result("a", false, 0)], policy)
-            .await;
-        pool.apply_health_results(vec![result("a", false, 0)], policy)
-            .await;
-        pool.apply_health_results(vec![result("a", true, 120)], policy)
-            .await;
-        pool.apply_health_results(vec![result("a", false, 0)], policy)
-            .await;
+        pool.apply_health_results(
+            vec![result("a", false, 0)],
+            policy,
+            &ProbeSchedule::default(),
+        )
+        .await;
+        pool.apply_health_results(
+            vec![result("a", false, 0)],
+            policy,
+            &ProbeSchedule::default(),
+        )
+        .await;
+        pool.apply_health_results(
+            vec![result("a", true, 120)],
+            policy,
+            &ProbeSchedule::default(),
+        )
+        .await;
+        pool.apply_health_results(
+            vec![result("a", false, 0)],
+            policy,
+            &ProbeSchedule::default(),
+        )
+        .await;
 
         assert_eq!(pool.len().await, 1, "streak was reset by the success");
         assert_eq!(pool.healthy_count().await, 0, "last probe failed");
@@ -477,8 +656,12 @@ mod tests {
         pool.merge(vec![proxy("a")]).await;
 
         let policy = EvictionPolicy::default();
-        pool.apply_health_results(vec![result("a", true, 90)], policy)
-            .await;
+        pool.apply_health_results(
+            vec![result("a", true, 90)],
+            policy,
+            &ProbeSchedule::default(),
+        )
+        .await;
         assert_eq!(pool.healthy_count().await, 1);
 
         // A later scrape sees the same proxy again.
@@ -498,13 +681,21 @@ mod tests {
         pool.merge(vec![proxy("a"), proxy("b")]).await;
 
         let policy = EvictionPolicy::default();
-        pool.apply_health_results(vec![result("a", true, 100)], policy)
-            .await;
+        pool.apply_health_results(
+            vec![result("a", true, 100)],
+            policy,
+            &ProbeSchedule::default(),
+        )
+        .await;
         assert_eq!(pool.healthy_count().await, 1);
 
         // "a" times out, "b" times out. Neither is evidence of a dead proxy.
         let outcome = pool
-            .apply_health_results(vec![timeout("a"), timeout("b")], policy)
+            .apply_health_results(
+                vec![timeout("a"), timeout("b")],
+                policy,
+                &ProbeSchedule::default(),
+            )
             .await;
 
         assert_eq!(outcome.inconclusive, 2);
@@ -524,8 +715,12 @@ mod tests {
         pool.merge(vec![proxy("a"), proxy("b"), proxy("c")]).await;
 
         let policy = EvictionPolicy::default();
-        pool.apply_health_results(vec![result("a", true, 80)], policy)
-            .await;
+        pool.apply_health_results(
+            vec![result("a", true, 80)],
+            policy,
+            &ProbeSchedule::default(),
+        )
+        .await;
 
         let unverified = pool.unverified().await;
         assert_eq!(unverified.len(), 2);
@@ -549,6 +744,7 @@ mod tests {
                 result("c", true, 50),
             ],
             policy,
+            &ProbeSchedule::default(),
         )
         .await;
 
@@ -562,8 +758,12 @@ mod tests {
         pool.merge(vec![proxy("a"), proxy("b")]).await;
 
         let policy = EvictionPolicy::default();
-        pool.apply_health_results(vec![result("a", true, 100), result("b", true, 900)], policy)
-            .await;
+        pool.apply_health_results(
+            vec![result("a", true, 100), result("b", true, 900)],
+            policy,
+            &ProbeSchedule::default(),
+        )
+        .await;
 
         assert_eq!(pool.best().await.map(|p| p.id), Some("a".to_string()));
 
@@ -593,6 +793,7 @@ mod tests {
             last_checked: Some(now),
             last_success: confirmed.then_some(now),
             first_seen: chrono::Utc::now(),
+            next_probe_at: chrono::Utc::now(),
             consecutive_failures: 0,
             score: 0.9,
         };
@@ -630,6 +831,7 @@ mod tests {
             last_checked: Some(now),
             last_success: Some(now),
             first_seen: chrono::Utc::now(),
+            next_probe_at: chrono::Utc::now(),
             consecutive_failures: 0,
             score: 0.5,
         };
@@ -662,6 +864,7 @@ mod tests {
             last_checked: None,
             last_success: None,
             first_seen: chrono::Utc::now() - chrono::Duration::seconds(7200),
+            next_probe_at: chrono::Utc::now(),
             consecutive_failures: 0,
             score: 0.0,
         };
@@ -682,9 +885,12 @@ mod tests {
         // been failing for two hours must not be kept alive by its own last
         // failure resetting the clock.
         assert!(
-            pool.apply_health_result(&result, policy).await,
-            "a never-working proxy past its TTL must be evicted"
+            pool.apply_health_result(&result, policy, &ProbeSchedule::default())
+                .await,
+            "a never-working proxy past its TTL must be condemned"
         );
+        // Removal is deferred to one sweep at the end of the batch.
+        assert_eq!(pool.evict_pending().await, 1);
         assert_eq!(pool.len().await, 0);
 
         // The same verdict on a fresh proxy must not evict it.
@@ -697,7 +903,113 @@ mod tests {
             latency_ms: 0,
             error: None,
         };
-        assert!(!pool.apply_health_result(&result, policy).await);
+        assert!(
+            !pool
+                .apply_health_result(&result, policy, &ProbeSchedule::default())
+                .await
+        );
+        assert_eq!(pool.evict_pending().await, 0);
         assert_eq!(pool.len().await, 1, "a single failure never evicts");
+    }
+
+    #[tokio::test]
+    async fn a_failed_proxy_backs_off_and_stops_being_due() {
+        let pool = ProxyPool::new();
+        pool.merge(vec![proxy("a"), proxy("b")]).await;
+
+        let policy = EvictionPolicy {
+            max_consecutive_failures: 10,
+            unverified_ttl_secs: 86_400,
+        };
+        let schedule = ProbeSchedule {
+            working_interval_secs: 600,
+            failed_backoff_secs: vec![300, 900, 3600],
+            inconclusive_backoff_secs: 120,
+        };
+
+        let now = chrono::Utc::now();
+        assert_eq!(
+            pool.due_for_check(now).await.len(),
+            2,
+            "new proxies are due"
+        );
+
+        // "a" fails: it must be scheduled into the future, not re-probed on
+        // the next cycle.
+        pool.apply_health_result(&result("a", false, 0), policy, &schedule)
+            .await;
+
+        let due = pool.due_for_check(now).await;
+        assert_eq!(due.len(), 1, "a failed proxy must not be due again at once");
+        assert_eq!(due[0].id, "b");
+
+        // It comes back after the backoff, not before.
+        let shortly = now + chrono::Duration::seconds(60);
+        assert_eq!(pool.due_for_check(shortly).await.len(), 1);
+        let after = now + chrono::Duration::seconds(400);
+        assert_eq!(pool.due_for_check(after).await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_working_proxy_is_rechecked_on_the_working_interval() {
+        let pool = ProxyPool::new();
+        pool.merge(vec![proxy("a")]).await;
+
+        let policy = EvictionPolicy::default();
+        let schedule = ProbeSchedule {
+            working_interval_secs: 600,
+            failed_backoff_secs: vec![300],
+            inconclusive_backoff_secs: 120,
+        };
+
+        let now = chrono::Utc::now();
+        pool.apply_health_result(&result("a", true, 50), policy, &schedule)
+            .await;
+
+        assert_eq!(pool.due_for_check(now).await.len(), 0);
+        assert_eq!(
+            pool.due_for_check(now + chrono::Duration::seconds(599))
+                .await
+                .len(),
+            0
+        );
+        assert_eq!(
+            pool.due_for_check(now + chrono::Duration::seconds(601))
+                .await
+                .len(),
+            1,
+            "a working proxy is due again after its interval"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_inconclusive_proxy_is_retried_sooner_than_a_failed_one() {
+        let pool = ProxyPool::new();
+        pool.merge(vec![proxy("a"), proxy("b")]).await;
+
+        let policy = EvictionPolicy::default();
+        let schedule = ProbeSchedule {
+            working_interval_secs: 600,
+            failed_backoff_secs: vec![3600],
+            inconclusive_backoff_secs: 120,
+        };
+
+        let now = chrono::Utc::now();
+        let inconclusive = HealthResult {
+            proxy_id: "a".to_string(),
+            verdict: Verdict::Inconclusive,
+            latency_ms: 0,
+            error: None,
+        };
+        pool.apply_health_result(&inconclusive, policy, &schedule)
+            .await;
+        pool.apply_health_result(&result("b", false, 0), policy, &schedule)
+            .await;
+
+        // The inconclusive one is due long before the failed one.
+        let later = now + chrono::Duration::seconds(200);
+        let due = pool.due_for_check(later).await;
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, "a");
     }
 }

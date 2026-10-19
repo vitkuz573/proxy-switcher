@@ -9,6 +9,16 @@ use tokio::sync::Semaphore;
 pub struct HealthChecker {
     concurrency: Arc<Semaphore>,
     target_url: String,
+    /// Budget for the proxy handshake.
+    ///
+    /// Kept separate from the exchange budget because they measure different
+    /// things. A proxy that cannot complete a handshake is dead, and a dead
+    /// proxy is the common case — most of the batch time was spent waiting
+    /// out the full timeout on endpoints that will never answer. Spending the
+    /// exchange budget on them made every batch several times longer than it
+    /// needed to be.
+    connect_timeout: Duration,
+    /// Budget for writing the request and reading the response.
     timeout: Duration,
 }
 
@@ -116,17 +126,20 @@ fn parse_target(url: &str) -> (String, u16, String) {
 /// target throttled us. What proves a proxy works is the ability to carry a
 /// request to the target and bring a valid HTTP response back; who then decided
 /// to answer 503 is the target's business, not the proxy's.
+#[allow(clippy::too_many_arguments)]
 async fn check_one(
     proxy: &ProxyInfo,
     host: &str,
     port: u16,
     path: &str,
+    connect_timeout: Duration,
     timeout: Duration,
 ) -> HealthResult {
     let start = Instant::now();
 
     let mut conn =
-        match tokio::time::timeout(timeout, Forwarder::connect_to(proxy, host, port)).await {
+        match tokio::time::timeout(connect_timeout, Forwarder::connect_to(proxy, host, port)).await
+        {
             Ok(Ok(conn)) => conn,
             // Refused, reset, DNS failure: the endpoint is not usable.
             Ok(Err(e)) => return HealthResult::failed(&proxy.id, format!("connect error: {e}")),
@@ -179,10 +192,16 @@ async fn check_one(
 }
 
 impl HealthChecker {
-    pub fn new(concurrency: usize, timeout_secs: u64, target_url: String) -> Self {
+    pub fn new(
+        concurrency: usize,
+        timeout_secs: u64,
+        connect_timeout_secs: u64,
+        target_url: String,
+    ) -> Self {
         Self {
             concurrency: Arc::new(Semaphore::new(concurrency)),
             target_url,
+            connect_timeout: Duration::from_secs(connect_timeout_secs),
             timeout: Duration::from_secs(timeout_secs),
         }
     }
@@ -191,7 +210,15 @@ impl HealthChecker {
     pub async fn check(&self, proxy: &ProxyInfo) -> HealthResult {
         let _permit = self.concurrency.acquire().await.expect("Semaphore closed");
         let (host, port, path) = parse_target(&self.target_url);
-        check_one(proxy, &host, port, &path, self.timeout).await
+        check_one(
+            proxy,
+            &host,
+            port,
+            &path,
+            self.connect_timeout,
+            self.timeout,
+        )
+        .await
     }
 
     /// Probe every proxy with bounded concurrency.
@@ -234,12 +261,13 @@ impl HealthChecker {
                 .expect("Semaphore closed");
             let (host, port, path) = parse_target(&self.target_url);
             let timeout = self.timeout;
+            let connect_timeout = self.connect_timeout;
             let tx = tx.clone();
             let checked = checked.clone();
 
             tokio::spawn(async move {
                 let _permit = permit;
-                let result = check_one(&proxy, &host, port, &path, timeout).await;
+                let result = check_one(&proxy, &host, port, &path, connect_timeout, timeout).await;
                 checked.fetch_add(1, Ordering::Relaxed);
                 let _ = tx.send(result).await;
             });

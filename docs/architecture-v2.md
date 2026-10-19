@@ -131,6 +131,47 @@ The engine's own `/api/v1/*` routes mirror the public shape, so the API service
 is a thin authenticated layer rather than a translator between two dialects.
 They are never exposed directly.
 
+## How the pool is scheduled
+
+The engine keeps a pool of proxies and probes them to find out which actually
+work. The naive design — re-probe every proxy that has never worked, on every
+cycle — has a cost that grows with the pool, and the pool grows with every
+scrape. A cycle over fifteen thousand proxies took minutes, and every restart
+started from an empty pool and paid the whole cost again.
+
+Three things fix it.
+
+**The pool is persisted.** The pool, its measurements and its schedule are
+written to SQLite and restored at boot, so a restart has a usable pool in
+seconds instead of minutes. `last_success` is what makes this work: without it
+every restored proxy reads as unverified and is re-probed from scratch.
+
+**Probes are scheduled per proxy.** Each proxy carries `next_probe_at`. A
+working proxy is re-checked on a fixed interval; a proxy that failed backs off
+through a growing schedule, so one that has been dead for a week is looked at a
+few times a day instead of on every cycle. The engine sleeps until the next
+proxy comes due, so a quiet pool stays quiet. The batch is bounded by what is
+due, not by the size of the pool.
+
+**Results are applied as they arrive.** `check_batch` streams each verdict into
+the pool the moment it is known, so a proxy becomes routable when it is
+confirmed rather than when the last probe of the batch finishes. Eviction is
+deferred to a single sweep at the end of a batch, because removing a proxy
+rebuilds the id index.
+
+Measured on a pool of fifteen thousand proxies:
+
+|                            | before    | after            |
+|----------------------------|-----------|------------------|
+| Full sweep                 | 7–20 min  | 85 s             |
+| Throughput                 | 24 /s     | 178 /s           |
+| Due for a probe afterwards | 15 311    | 0                |
+| Working proxies after boot | 0         | 2 250, in 3 s    |
+
+The remaining levers are ordinary: probes run concurrently (500 by default),
+the handshake gets a short budget of its own so dead proxies are not waited out
+at full length, and the probe target is a fast, highly available endpoint.
+
 ## Migration order
 
 Each step is independently verifiable and leaves the system running.

@@ -247,6 +247,11 @@ scrape
       keyValue("Last run", run.started_at ? new Date(run.started_at).toLocaleString() : null);
       keyValue("Proxies found", run.proxies_found);
       keyValue("Healthy", run.healthy_count);
+      keyValue("Due for probe", run.pending);
+      keyValue(
+        "Next probe due",
+        run.next_due_at ? new Date(run.next_due_at).toLocaleString() : null,
+      );
       keyValue("Errors", run.errors.length);
 
       if (run.health_check) {

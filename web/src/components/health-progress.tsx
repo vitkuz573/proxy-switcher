@@ -17,6 +17,8 @@ const IDLE: ScrapeRun = {
   finished_at: null,
   proxies_found: 0,
   healthy_count: 0,
+  pending: 0,
+  next_due_at: null,
   health_check: null,
   errors: [],
 };
@@ -108,15 +110,22 @@ export function HealthProgress({ initial }: { initial: ScrapeRun }) {
       </CardHeader>
 
       <CardContent className="grid gap-4">
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           <Metric label="Proxies found" value={run.proxies_found} />
           <Metric label="Healthy" value={run.healthy_count} />
+          <Metric label="Due" value={run.pending} />
           <Metric
             label="Errors"
             value={run.errors.length}
             className={run.errors.length > 0 ? "text-destructive" : undefined}
           />
         </div>
+
+        {run.next_due_at ? (
+          <p className="text-xs text-muted-foreground">
+            Next probe due {new Date(run.next_due_at).toLocaleString()}
+          </p>
+        ) : null}
 
         {progress ? (
           <div className="grid gap-2">

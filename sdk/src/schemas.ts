@@ -87,6 +87,10 @@ export const ScrapeRunSchema = Type.Object(
     finished_at: Type.Union([Type.String(), Type.Null()]),
     proxies_found: Type.Integer(),
     healthy_count: Type.Integer(),
+    /** How many proxies are due for a probe right now. */
+    pending: Type.Integer(),
+    /** When the next proxy comes due. */
+    next_due_at: Type.Union([Type.String(), Type.Null()]),
     health_check: Type.Union([HealthCheckProgressSchema, Type.Null()]),
     errors: Type.Array(Type.String()),
   },

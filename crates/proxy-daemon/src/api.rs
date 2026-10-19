@@ -7,7 +7,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use proxy_core::health::HealthChecker;
-use proxy_core::pool::{EvictionPolicy, ProxyPool};
+use proxy_core::pool::{EvictionPolicy, ProbeSchedule, ProxyPool};
 use proxy_core::proxy::{Anonymity, ProxyInfo, ProxyProtocol};
 use proxy_core::router::Router as ProxyRouter;
 use proxy_core::scraper::Scraper;
@@ -83,6 +83,8 @@ pub struct AppState {
     pub check_in_flight: Arc<std::sync::atomic::AtomicBool>,
     /// When a proxy may be evicted, shared by every path that applies results.
     pub eviction_policy: EvictionPolicy,
+    /// Per-proxy probe schedule, shared by every path that applies results.
+    pub probe_schedule: ProbeSchedule,
 }
 
 /* ── Wire types ────────────────────────────────────────────────────────── */
@@ -108,6 +110,14 @@ struct ScrapeRun {
     finished_at: Option<DateTime<Utc>>,
     proxies_found: usize,
     healthy_count: usize,
+    /// How many proxies are due for a probe right now.
+    pending: usize,
+    /// When the next proxy comes due.
+    ///
+    /// The pool is scheduled per proxy, so "nothing to do" is a normal state
+    /// rather than a failure. Reporting when the next probe is due turns a
+    /// quiet pool from a mystery into a fact.
+    next_due_at: Option<DateTime<Utc>>,
     health_check: Option<HealthCheckProgress>,
     errors: Vec<String>,
 }
@@ -326,6 +336,7 @@ async fn create_proxy(State(state): State<AppState>, Json(input): Json<AddProxyI
         last_checked: None,
         last_success: None,
         first_seen: chrono::Utc::now(),
+        next_probe_at: chrono::Utc::now(),
         consecutive_failures: 0,
         score: 0.0,
     };
@@ -490,6 +501,7 @@ async fn create_scrape_run(State(state): State<AppState>) -> Response {
     let check_progress = state.check_progress.clone();
     let check_in_flight = state.check_in_flight.clone();
     let policy = state.eviction_policy;
+    let schedule = state.probe_schedule.clone();
 
     tokio::spawn(async move {
         let mut s = scrape_state.write().await;
@@ -511,7 +523,10 @@ async fn create_scrape_run(State(state): State<AppState>) -> Response {
         let count = discovered.len();
         pool.merge(discovered).await;
 
-        let pending = pool.unverified().await;
+        // Probe what the pool says is due, exactly like the scheduler does.
+        // The old code probed every proxy that had never worked, which on a
+        // large pool meant thousands of probes for a manual trigger.
+        let pending = pool.due_for_check(chrono::Utc::now()).await;
         {
             let mut s = scrape_state.write().await;
             s.running = false;
@@ -541,22 +556,23 @@ async fn create_scrape_run(State(state): State<AppState>) -> Response {
             s.check_total = pending.len();
         }
 
-        let evicted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counter = evicted.clone();
         let apply_pool = pool.clone();
+        let batch_schedule = schedule.clone();
 
         let counts = health
             .check_batch(&pending, check_progress, move |result| {
                 let pool = apply_pool.clone();
-                let counter = counter.clone();
+                let schedule = batch_schedule.clone();
                 async move {
-                    if pool.apply_health_result(&result, policy).await {
-                        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
+                    pool.apply_health_result(&result, policy, &schedule).await;
                 }
             })
             .await;
         check_in_flight.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        // One sweep for the whole batch, for the same reason: removal rebuilds
+        // the id index.
+        let evicted_count = pool.evict_pending().await;
 
         // Resolve before the macro: an `.await` inside tracing arguments would
         // keep its temporary alive across the await and make the future !Send.
@@ -567,7 +583,7 @@ async fn create_scrape_run(State(state): State<AppState>) -> Response {
             working = counts.working,
             failed = counts.failed,
             inconclusive = counts.inconclusive,
-            evicted = evicted.load(std::sync::atomic::Ordering::Relaxed),
+            evicted = evicted_count,
             healthy,
             "scrape run complete"
         );
@@ -596,13 +612,23 @@ async fn get_scrape_run(State(state): State<AppState>) -> Json<ScrapeRun> {
         ("idle", None)
     };
 
+    // Read the live count from the pool rather than the copy cached in the
+    // scrape state. The cached value was only refreshed when a batch finished,
+    // so during a run it reported zero while the pool held hundreds of
+    // working proxies — and the summary endpoint disagreed with it.
+    let healthy_count = state.pool.healthy_count().await;
+    let pending = state.pool.due_for_check(Utc::now()).await.len();
+    let next_due_at = state.pool.next_due_at().await;
+
     Json(ScrapeRun {
         id: "run_current".to_string(),
         state: state_name,
         started_at: s.last_run,
         finished_at: s.last_run,
         proxies_found: s.proxies_found,
-        healthy_count: s.healthy_count,
+        healthy_count,
+        pending,
+        next_due_at,
         health_check: progress.map(|(checked, total)| HealthCheckProgress { checked, total }),
         errors: s.errors.clone(),
     })

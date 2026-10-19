@@ -20,6 +20,14 @@ pub struct ProxyInfo {
     /// the age reset on every attempt and a proxy that never worked was never
     /// evicted — the pool only ever grew.
     pub first_seen: chrono::DateTime<chrono::Utc>,
+    /// When this proxy should next be probed.
+    ///
+    /// Explicit scheduling state rather than something derived from the
+    /// failure count: the pool re-probes only what is due, so a proxy that has
+    /// been dead for a week is looked at a few times a day instead of on every
+    /// cycle. Without this the batch size was the whole unverified pool, and
+    /// it grew with every scrape.
+    pub next_probe_at: chrono::DateTime<chrono::Utc>,
     /// Consecutive failed probes. A single failure never evicts a proxy.
     pub consecutive_failures: u32,
     pub score: f64,
@@ -28,11 +36,14 @@ pub struct ProxyInfo {
 impl ProxyInfo {
     /// A freshly discovered proxy: known to exist, proven to work by nothing.
     pub fn discovered(mut self) -> Self {
+        let now = chrono::Utc::now();
         self.last_checked = None;
         self.last_success = None;
         self.consecutive_failures = 0;
         self.score = 0.0;
-        self.first_seen = chrono::Utc::now();
+        self.first_seen = now;
+        // Due immediately: a new proxy should be probed as soon as possible.
+        self.next_probe_at = now;
         self
     }
 }
