@@ -12,3 +12,9 @@ node_modules/
 *.tsbuildinfo
 .env
 .env.local
+
+# Local release staging for scripts/deploy-api.sh
+.release/
+
+# Local release staging for scripts/deploy-web.sh
+.release-web/

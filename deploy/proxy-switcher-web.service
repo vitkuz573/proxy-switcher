@@ -1,0 +1,38 @@
+[Unit]
+Description=Proxy Switcher Web Console
+Documentation=file:///opt/proxy-switcher/current-web/docs/architecture-v2.md
+After=network-online.target proxy-switcher-api.service
+Wants=network-online.target
+Requires=proxy-switcher-api.service
+
+[Service]
+Type=simple
+User=proxy-switcher
+Group=proxy-switcher
+WorkingDirectory=/opt/proxy-switcher/current-web
+EnvironmentFile=/etc/proxy-switcher/web.env
+Environment=PORT=3100
+Environment=HOSTNAME=127.0.0.1
+Environment=NODE_ENV=production
+EnvironmentFile=-/etc/proxy-switcher/api.env
+ExecStart=/usr/local/bin/node node_modules/next/dist/bin/next start
+Restart=on-failure
+RestartSec=5
+
+# The console renders static assets and proxies API calls; it never writes to
+# disk, so the filesystem can stay read-only.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
