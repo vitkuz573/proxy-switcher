@@ -3,9 +3,28 @@ import { createInterface } from "node:readline/promises";
 import { Command, Help, type Option } from "commander";
 import { anonymousClient, CliError, cliCall, client } from "./client.js";
 import { configPath, loadConfig, saveConfig } from "./config.js";
-import { dim, green, heading, keyValue, red, table, truncate } from "./format.js";
 import { countryFlag, countryName, resolveLocale, translator } from "./i18n.js";
 import { runCli } from "./run.js";
+import {
+  accent,
+  badge,
+  bar,
+  bold,
+  dim,
+  emit,
+  err,
+  field,
+  fieldLines,
+  live,
+  muted,
+  ok,
+  panel,
+  panelLines,
+  section,
+  setJson,
+  spinner,
+  table,
+} from "./ui.js";
 
 /**
  * The language for this run.
@@ -15,7 +34,13 @@ import { runCli } from "./run.js";
  * global option is only known once the arguments have been parsed.
  */
 const locale = resolveLocale(localeArgument(process.argv));
+setJson(jsonArgument(process.argv));
 const t = translator(locale);
+
+/** Whether the machine-readable output was asked for. */
+function jsonArgument(argv: string[]): boolean {
+  return argv.includes("--json");
+}
 
 /** The value of the global `--locale` option, read straight from the arguments. */
 function localeArgument(argv: string[]): string | undefined {
@@ -88,7 +113,8 @@ program
   .description(t("common.description"))
   .version("2.0.0")
   .option("-u, --url <url>", t("common.apiUrl"))
-  .option("--locale <locale>", t("common.locale"));
+  .option("--locale <locale>", t("common.locale"))
+  .option("--json", t("common.json"));
 
 program
   .command("auth")
@@ -104,23 +130,30 @@ program
           const email = options.email ?? (await prompt(t("auth.login.emailPrompt")));
           const password = options.password ?? (await prompt(t("auth.login.passwordPrompt"), true));
 
-          const api = anonymousClient(options.url);
-          const granted = await cliCall(() => api.exchangeToken({ email, password }));
+          const waiting = spinner(t("auth.login.waiting"));
+          try {
+            const api = anonymousClient(options.url);
+            const granted = await cliCall(() => api.exchangeToken({ email, password }));
 
-          saveConfig({
-            baseUrl: options.url ?? loadConfig().baseUrl,
-            token: granted.token,
-          });
+            saveConfig({
+              baseUrl: options.url ?? loadConfig().baseUrl,
+              token: granted.token,
+            });
 
-          console.log(
-            `\n  ${green("✓")} ${t("auth.login.signedIn", {
-              email: granted.user.email,
-              role: granted.user.role,
-            })}`,
-          );
-          console.log(
-            `  ${dim(t("auth.login.tokenStored", { prefix: granted.api_token.prefix, path: configPath() }))}`,
-          );
+            waiting.stop();
+            console.log(
+              `  ${ok("✓")} ${t("auth.login.signedIn", {
+                email: granted.user.email,
+                role: granted.user.role,
+              })}`,
+            );
+            console.log(
+              `  ${dim(t("auth.login.tokenStored", { prefix: granted.api_token.prefix, path: configPath() }))}`,
+            );
+          } catch (error) {
+            waiting.stop();
+            throw error;
+          }
         });
       }),
   )
@@ -128,12 +161,14 @@ program
     new Command("status").description(t("auth.status.description")).action(async () => {
       await runCli(async () => {
         const config = loadConfig();
-        keyValue(t("auth.status.apiUrl"), config.baseUrl);
-        keyValue(
-          t("auth.status.token"),
-          config.token ? green(t("auth.status.stored")) : red(t("auth.status.missing")),
-        );
-        keyValue(t("auth.status.config"), configPath());
+        panel(t("auth.status.title"), [
+          [t("auth.status.apiUrl"), config.baseUrl],
+          [
+            t("auth.status.token"),
+            config.token ? ok(t("auth.status.stored")) : err(t("auth.status.missing")),
+          ],
+          [t("auth.status.config"), configPath()],
+        ]);
       });
     }),
   )
@@ -141,40 +176,92 @@ program
     new Command("logout").description(t("auth.logout.description")).action(async () => {
       await runCli(async () => {
         saveConfig({ baseUrl: loadConfig().baseUrl });
-        console.log(`  ${green("✓")} ${t("auth.logout.done")}`);
+        console.log(`  ${ok("✓")} ${t("auth.logout.done")}`);
       });
     }),
   );
 
+// With no subcommand the tool shows the dashboard: the state of the engine is
+// what a person opening it wants first.
+program.action(async () => {
+  await program.parseAsync(["node", "ps", "status"]);
+});
+
 program
   .command("status")
   .description(t("status.description"))
-  .action(async () => {
+  .option("-w, --watch", t("status.watch"))
+  .action(async (options: { watch?: boolean }) => {
     await runCli(async () => {
+      if (options.watch) {
+        // The dashboard redraws itself, so watching it does not fill the
+        // terminal with a copy every two seconds.
+        const view = live(async () => {
+          const api = client();
+          const [summary, stats] = await Promise.all([
+            cliCall(() => api.getSummary()),
+            cliCall(() => api.getStats()),
+          ]);
+
+          const active = summary.active_proxy;
+          return [
+            ...panelLines(t("status.title"), [
+              [t("status.poolSize"), bold(summary.pool_size.toLocaleString())],
+              [t("status.healthy"), bold(summary.healthy_count.toLocaleString())],
+              [
+                t("status.activeProxy"),
+                active
+                  ? `${ok(`${active.host}:${active.port}`)}  ${dim(`${active.protocol} · ${active.anonymity}`)}`
+                  : muted(t("status.noneSelected")),
+              ],
+            ]),
+            "",
+            ...fieldLines(t("status.network"), [
+              [t("status.tcpConnections"), String(stats.tcp_connections)],
+              [t("status.udpFlows"), String(stats.udp_flows)],
+              [t("status.dnsCache"), String(stats.dns_cache_size)],
+            ]),
+          ];
+        });
+
+        // The view runs until the command is interrupted. The signal ends
+        // the process outright: there is nothing left to do once the
+        // dashboard is stopped.
+        const stop = () => {
+          view.stop();
+          process.exit(0);
+        };
+        process.once("SIGINT", stop);
+        process.once("SIGTERM", stop);
+        return;
+      }
+
       const api = client();
       const [summary, stats] = await Promise.all([
         cliCall(() => api.getSummary()),
         cliCall(() => api.getStats()),
       ]);
 
-      heading(t("status.engine"));
-      keyValue(t("status.poolSize"), summary.pool_size);
-      keyValue(t("status.healthy"), stats.healthy_count);
-      keyValue(t("status.tcpConnections"), stats.tcp_connections);
-      keyValue(t("status.udpFlows"), stats.udp_flows);
-      keyValue(t("status.dnsCache"), stats.dns_cache_size);
-
-      heading(t("status.activeProxy"));
-      if (!summary.active_proxy) {
-        console.log(`  ${dim(t("status.noneSelected"))}`);
+      if (emit({ ...summary, stats })) {
         return;
       }
-      const p = summary.active_proxy;
-      keyValue(t("status.endpoint"), `${p.host}:${p.port}`);
-      keyValue(t("status.protocol"), p.protocol);
-      keyValue(t("status.anonymity"), p.anonymity);
-      keyValue(t("status.latency"), p.latency_ms === null ? null : `${p.latency_ms} ms`);
-      keyValue(t("status.score"), p.score.toFixed(1));
+
+      const active = summary.active_proxy;
+      panel(t("status.title"), [
+        [t("status.poolSize"), bold(summary.pool_size.toLocaleString())],
+        [t("status.healthy"), bold(summary.healthy_count.toLocaleString())],
+        [
+          t("status.activeProxy"),
+          active
+            ? `${ok(`${active.host}:${active.port}`)}  ${dim(`${active.protocol} · ${active.anonymity}`)}`
+            : muted(t("status.noneSelected")),
+        ],
+      ]);
+
+      section(t("status.network"));
+      field(t("status.tcpConnections"), stats.tcp_connections);
+      field(t("status.udpFlows"), stats.udp_flows);
+      field(t("status.dnsCache"), stats.dns_cache_size);
     });
   });
 
@@ -199,18 +286,33 @@ proxies
       );
       const summary = await cliCall(() => api.getSummary());
 
-      heading(t("proxies.list.title", { shown: rows.length, total: summary.pool_size }));
+      if (emit(rows)) {
+        return;
+      }
+
+      console.log(
+        `\n  ${bold(t("proxies.list.title", { shown: rows.length, total: summary.pool_size }))}`,
+      );
+
       table(
-        t.list("proxies.list.columns"),
+        [
+          { header: "", max: 1 },
+          { header: t("proxies.list.endpoint"), max: 26 },
+          { header: t("proxies.list.protocol"), max: 8 },
+          { header: t("proxies.list.latency"), align: "right", max: 9 },
+          { header: t("proxies.list.flag"), max: 3 },
+          { header: t("proxies.list.score"), align: "right", max: 5 },
+        ],
         rows.map((p) => [
-          p.id === summary.active_proxy?.id ? "*" : " ",
-          truncate(`${p.host}:${p.port}`, 26),
-          truncate(p.protocol, 7),
-          truncate(p.latency_ms === null ? "—" : `${p.latency_ms} ms`, 9),
+          p.id === summary.active_proxy?.id ? accent("▸") : " ",
+          `${p.host}:${p.port}`,
+          p.protocol,
+          p.latency_ms === null ? "—" : `${p.latency_ms} ms`,
           countryFlag(p.country),
           p.score.toFixed(1),
         ]),
       );
+      console.log();
     });
   });
 
@@ -234,15 +336,22 @@ proxies
           throw new CliError(t("proxies.add.badPort"));
         }
 
-        const proxy = await cliCall(() =>
-          client().createProxy({
-            host,
-            port: portNumber,
-            protocol,
-            ...(options.country ? { country: options.country } : {}),
-          }),
-        );
-        console.log(`  ${green("✓")} ${t("proxies.add.done", { id: proxy.id })}`);
+        const waiting = spinner(t("proxies.add.waiting"));
+        try {
+          const proxy = await cliCall(() =>
+            client().createProxy({
+              host,
+              port: portNumber,
+              protocol,
+              ...(options.country ? { country: options.country } : {}),
+            }),
+          );
+          waiting.stop();
+          console.log(`  ${ok("✓")} ${t("proxies.add.done", { id: proxy.id })}`);
+        } catch (error) {
+          waiting.stop();
+          throw error;
+        }
       });
     },
   );
@@ -254,7 +363,7 @@ proxies
   .action(async (id: string) => {
     await runCli(async () => {
       await cliCall(() => client().deleteProxy(id));
-      console.log(`  ${green("✓")} ${t("proxies.remove.done", { id })}`);
+      console.log(`  ${ok("✓")} ${t("proxies.remove.done", { id })}`);
     });
   });
 
@@ -265,7 +374,7 @@ proxies
   .action(async (id: string) => {
     await runCli(async () => {
       const proxy = await cliCall(() => client().setActiveProxy(id));
-      console.log(`  ${green("✓")} ${t("proxies.switch.done", { id: proxy.id })}`);
+      console.log(`  ${ok("✓")} ${t("proxies.switch.done", { id: proxy.id })}`);
     });
   });
 
@@ -275,7 +384,7 @@ program
   .action(async () => {
     await runCli(async () => {
       const proxy = await cliCall(() => client().rotateActiveProxy());
-      console.log(`  ${green("✓")} ${t("rotate.done", { id: proxy.id })}`);
+      console.log(`  ${ok("✓")} ${t("rotate.done", { id: proxy.id })}`);
     });
   });
 
@@ -287,11 +396,20 @@ sources
   .action(async () => {
     await runCli(async () => {
       const list = await cliCall(() => client().listSources());
-      heading(t("sources.list.title", { count: list.length }));
+
+      if (emit(list)) {
+        return;
+      }
+
+      console.log(`\n  ${bold(t("sources.list.title", { count: list.length }))}`);
       table(
-        t.list("sources.list.columns"),
-        list.map((s) => [s.id, truncate(s.url, 74)]),
+        [
+          { header: t("sources.list.id"), max: 20 },
+          { header: t("sources.list.url"), max: 70 },
+        ],
+        list.map((s) => [s.id, s.url]),
       );
+      console.log();
     });
   });
 
@@ -302,7 +420,7 @@ sources
   .action(async (url: string) => {
     await runCli(async () => {
       const source = await cliCall(() => client().createSource(url));
-      console.log(`  ${green("✓")} ${t("sources.add.done", { id: source.id })}`);
+      console.log(`  ${ok("✓")} ${t("sources.add.done", { id: source.id })}`);
     });
   });
 
@@ -313,7 +431,7 @@ sources
   .action(async (id: string) => {
     await runCli(async () => {
       await cliCall(() => client().deleteSource(id));
-      console.log(`  ${green("✓")} ${t("sources.remove.done", { id })}`);
+      console.log(`  ${ok("✓")} ${t("sources.remove.done", { id })}`);
     });
   });
 
@@ -322,34 +440,86 @@ const scrape = program.command("scrape").description(t("scrape.group"));
 scrape
   .command("status", { isDefault: true })
   .description(t("scrape.status.description"))
-  .action(async () => {
+  .option("-w, --watch", t("status.watch"))
+  .action(async (options: { watch?: boolean }) => {
     await runCli(async () => {
+      if (options.watch) {
+        const view = live(async () => {
+          const run = await cliCall(() => client().getCurrentScrapeRun());
+          const progress = run.health_check;
+          const percent =
+            progress && progress.total > 0
+              ? Math.round((progress.checked / progress.total) * 100)
+              : 0;
+
+          return [
+            ...panelLines(t("scrape.status.title"), [
+              [
+                t("scrape.status.state"),
+                `${run.state === "idle" ? muted("○") : ok("●")} ${run.state}`,
+              ],
+              [t("scrape.status.proxiesFound"), bold(run.proxies_found.toLocaleString())],
+              [t("scrape.status.healthy"), bold(run.healthy_count.toLocaleString())],
+              [t("scrape.status.dueForProbe"), bold(run.pending.toLocaleString())],
+            ]),
+            "",
+            `  ${bar(progress?.checked ?? 0, progress?.total ?? 0)}  ${bold(
+              `${(progress?.checked ?? 0).toLocaleString()}/${(progress?.total ?? 0).toLocaleString()}`,
+            )} ${dim(`(${percent}%)`)}`,
+            "",
+          ];
+        });
+
+        const stop = () => {
+          view.stop();
+          process.exit(0);
+        };
+        process.once("SIGINT", stop);
+        process.once("SIGTERM", stop);
+        return;
+      }
+
       const run = await cliCall(() => client().getCurrentScrapeRun());
 
-      heading(t("scrape.status.title"));
-      keyValue(t("scrape.status.state"), run.state);
-      keyValue(
-        t("scrape.status.lastRun"),
-        run.started_at ? new Date(run.started_at).toLocaleString() : null,
-      );
-      keyValue(t("scrape.status.proxiesFound"), run.proxies_found);
-      keyValue(t("scrape.status.healthy"), run.healthy_count);
-      keyValue(t("scrape.status.dueForProbe"), run.pending);
-      keyValue(
-        t("scrape.status.nextDue"),
-        run.next_due_at ? new Date(run.next_due_at).toLocaleString() : null,
-      );
-      keyValue(t("scrape.status.errors"), run.errors.length);
+      if (emit(run)) {
+        return;
+      }
+
+      const state = run.state === "idle" ? "idle" : run.state === "running" ? "warn" : "ok";
+
+      panel(t("scrape.status.title"), [
+        [t("scrape.status.state"), `${badge(state)} ${run.state}`],
+        [
+          t("scrape.status.lastRun"),
+          run.started_at
+            ? new Date(run.started_at).toLocaleString(locale)
+            : muted(t("common.never")),
+        ],
+        [t("scrape.status.proxiesFound"), bold(run.proxies_found.toLocaleString())],
+        [t("scrape.status.healthy"), bold(run.healthy_count.toLocaleString())],
+        [t("scrape.status.dueForProbe"), bold(run.pending.toLocaleString())],
+        [
+          t("scrape.status.nextDue"),
+          run.next_due_at ? new Date(run.next_due_at).toLocaleString(locale) : muted("—"),
+        ],
+      ]);
 
       if (run.health_check) {
         const { checked, total } = run.health_check;
         const percent = total > 0 ? Math.round((checked / total) * 100) : 0;
-        heading(t("scrape.status.healthCheck"));
-        keyValue(t("scrape.status.progress", { checked, total, percent }), "");
+        section(t("scrape.status.healthCheck"));
+        console.log(
+          `  ${bar(checked, total)}  ${bold(`${checked.toLocaleString()}/${total.toLocaleString()}`)} ${dim(`(${percent}%)`)}`,
+        );
+        console.log();
       }
 
-      for (const error of run.errors) {
-        console.log(`  ${red("!")} ${error}`);
+      if (run.errors.length > 0) {
+        section(t("scrape.status.errorsTitle"));
+        for (const message of run.errors.slice(0, 8)) {
+          console.log(`  ${err("!")} ${message}`);
+        }
+        console.log();
       }
     });
   });
@@ -360,37 +530,48 @@ scrape
   .action(async () => {
     await runCli(async () => {
       await cliCall(() => client().createScrapeRun());
-      console.log(`  ${green("✓")} ${t("scrape.run.done")}`);
+      console.log(`  ${ok("✓")} ${t("scrape.run.done")}`);
     });
   });
 
 program
   .command("geo")
-  .description("Show where the pool is")
-  .option("-n, --limit <count>", "how many countries to show", "20")
+  .description(t("geo.description"))
+  .option("-n, --limit <count>", t("geo.limit"), "20")
   .action(async (options: { limit: string }) => {
     await runCli(async () => {
       const limit = Number(options.limit);
       const statistics = await cliCall(() => client().getStatistics());
 
-      heading(t("geo.title"));
-      keyValue(t("geo.poolSize"), statistics.pool_size);
-      keyValue(t("geo.working"), statistics.working);
-      keyValue(t("geo.exitAddresses"), statistics.distinct_exit_addresses);
-      keyValue(t("geo.countries"), statistics.by_country.length);
+      if (emit(statistics)) {
+        return;
+      }
 
-      const countries = statistics.by_country.slice(0, Number.isFinite(limit) ? limit : 20);
+      panel(t("geo.title"), [
+        [t("geo.poolSize"), bold(statistics.pool_size.toLocaleString())],
+        [t("geo.working"), bold(statistics.working.toLocaleString())],
+        [t("geo.exitAddresses"), bold(statistics.distinct_exit_addresses.toLocaleString())],
+        [t("geo.countries"), bold(statistics.by_country.length.toLocaleString())],
+      ]);
 
-      heading(t("geo.byCountry", { count: countries.length }));
+      console.log(`\n  ${bold(t("geo.byCountry", { count: statistics.by_country.length }))}`);
       table(
-        t.list("geo.columns"),
-        countries.map((entry) => [
-          countryFlag(entry.country),
-          truncate(countryName(entry.country, locale), 24),
-          String(entry.count),
-          String(entry.working),
-        ]),
+        [
+          { header: t("geo.flag"), max: 3 },
+          { header: t("geo.country"), max: 28 },
+          { header: t("geo.proxies"), align: "right", max: 8 },
+          { header: t("geo.workingColumn"), align: "right", max: 8 },
+        ],
+        statistics.by_country
+          .slice(0, Number.isFinite(limit) ? limit : 20)
+          .map((entry) => [
+            countryFlag(entry.country),
+            countryName(entry.country, locale),
+            entry.count.toLocaleString(),
+            entry.working.toLocaleString(),
+          ]),
       );
+      console.log();
     });
   });
 
@@ -405,17 +586,28 @@ program
         client().listAuditEvents({ limit: Number.isFinite(limit) ? limit : 25 }),
       );
 
-      heading(t("audit.title", { count: entries.length }));
+      if (emit(entries)) {
+        return;
+      }
+
+      console.log(`\n  ${bold(t("audit.title", { count: entries.length }))}`);
       table(
-        t.list("audit.columns"),
+        [
+          { header: t("audit.when"), max: 20 },
+          { header: t("audit.actor"), max: 10 },
+          { header: t("audit.action"), max: 24 },
+          { header: t("audit.target"), max: 26 },
+          { header: t("audit.outcome"), max: 8 },
+        ],
         entries.map((e) => [
-          new Date(e.ts).toLocaleString(),
+          new Date(e.ts).toLocaleString(locale),
           e.actor_type,
-          truncate(e.action, 22),
-          truncate(e.target ?? "—", 28),
-          e.outcome === "allowed" ? green(t("audit.allowed")) : red(t("audit.denied")),
+          e.action,
+          e.target ?? "—",
+          e.outcome === "allowed" ? ok(t("audit.allowed")) : err(t("audit.denied")),
         ]),
       );
+      console.log();
     });
   });
 
@@ -424,7 +616,7 @@ async function prompt(question: string, secret = false): Promise<string> {
     process.stdout.write(question);
     const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
     // Suppress echo: the value is a live credential.
-    const muted = new Promise<string>((resolve) => {
+    const mutedAnswer = new Promise<string>((resolve) => {
       const onData = (char: string) => {
         if (char === "\n" || char === "\r") {
           process.stdin.removeListener("data", onData);
@@ -435,7 +627,7 @@ async function prompt(question: string, secret = false): Promise<string> {
       process.stdin.on("data", onData);
     });
     process.stdout.write(dim(" (hidden)"));
-    const value = await Promise.race([rl.question(""), muted]);
+    const value = await Promise.race([rl.question(""), mutedAnswer]);
     rl.close();
     process.stdout.write("\n");
     return value;

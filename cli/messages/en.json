@@ -1,61 +1,64 @@
 {
   "common": {
-    "nothingToShow": "(nothing to show)",
-    "none": "—",
-    "notSignedIn": "Not signed in.",
-    "runLogin": "Run 'ps auth login' first.",
     "description": "Control the proxy-switcher engine",
     "apiUrl": "API base URL",
-    "locale": "language for the output: en or ru"
+    "locale": "language for the output: en or ru",
+    "never": "never",
+    "json": "output JSON instead of a table"
   },
   "auth": {
+    "group": "Credential management",
     "login": {
       "description": "Exchange email and password for an API token",
       "email": "account email",
       "password": "account password",
       "emailPrompt": "Email: ",
       "passwordPrompt": "Password: ",
+      "waiting": "Signing in…",
       "signedIn": "Signed in as {email} ({role})",
       "tokenStored": "token {prefix} stored in {path}"
     },
     "status": {
       "description": "Show which token is stored",
+      "title": "Session",
       "apiUrl": "API URL",
       "token": "Token",
       "stored": "stored",
       "missing": "missing",
-      "config": "Config"
+      "config": "File"
     },
     "logout": {
       "description": "Forget the stored token",
       "done": "Token removed"
-    },
-    "group": "Credential management"
+    }
   },
   "status": {
     "description": "Active proxy and pool size",
-    "engine": "Engine",
+    "title": "Engine",
     "poolSize": "Pool size",
-    "healthy": "Healthy",
+    "healthy": "Working",
     "tcpConnections": "TCP connections",
     "udpFlows": "UDP flows",
     "dnsCache": "DNS cache entries",
     "activeProxy": "Active proxy",
     "noneSelected": "none selected",
-    "endpoint": "Endpoint",
-    "protocol": "Protocol",
-    "anonymity": "Anonymity",
-    "latency": "Latency",
-    "score": "Score"
+    "engine": "Engine",
+    "network": "Network",
+    "watch": "keep the dashboard up to date"
   },
   "proxies": {
+    "group": "Manage the proxy pool",
     "list": {
       "description": "List proxies",
       "search": "filter by host, port, protocol or country",
       "limit": "maximum rows",
       "sort": "score | latency | host",
-      "title": "Proxies ({shown} of {total})",
-      "columns": ["", "ENDPOINT", "PROTO", "LATENCY", "FLAG", "SCORE"]
+      "title": "Proxies — {shown} of {total}",
+      "endpoint": "ENDPOINT",
+      "protocol": "PROTO",
+      "latency": "LATENCY",
+      "flag": "FLAG",
+      "score": "SCORE"
     },
     "add": {
       "description": "Add a proxy manually",
@@ -63,6 +66,7 @@
       "port": "port number",
       "protocol": "http | https | socks4 | socks5",
       "country": "country label",
+      "waiting": "Adding…",
       "done": "Added {id} to the pool",
       "badPort": "Port must be an integer between 1 and 65535."
     },
@@ -75,18 +79,19 @@
       "description": "Route traffic through a proxy",
       "id": "proxy id, i.e. host:port",
       "done": "Active proxy: {id}"
-    },
-    "group": "Manage the proxy pool"
+    }
   },
   "rotate": {
     "description": "Move to the next proxy in the pool",
     "done": "Active proxy: {id}"
   },
   "sources": {
+    "group": "Manage scrape sources",
     "list": {
       "description": "List scrape sources",
-      "title": "Sources ({count})",
-      "columns": ["ID", "URL"]
+      "title": "Sources — {count}",
+      "id": "ID",
+      "url": "URL"
     },
     "add": {
       "description": "Add a scrape source",
@@ -97,35 +102,50 @@
       "description": "Remove a scrape source",
       "id": "source id, as shown by 'ps sources list'",
       "done": "Source {id} removed"
-    },
-    "group": "Manage scrape sources"
+    }
   },
   "scrape": {
+    "group": "Trigger and inspect scrapes",
     "status": {
       "description": "Show scrape state and health-check progress",
       "title": "Scrape",
       "state": "State",
       "lastRun": "Last run",
       "proxiesFound": "Proxies found",
-      "healthy": "Healthy",
+      "healthy": "Working",
       "dueForProbe": "Due for probe",
       "nextDue": "Next probe due",
-      "errors": "Errors",
-      "healthCheck": "Health check",
-      "progress": "{checked} / {total} ({percent}%)"
+      "errorsTitle": "Errors from the last cycle",
+      "healthCheck": "Health check"
     },
     "run": {
       "description": "Trigger a scrape cycle now",
       "done": "Scrape started"
-    },
-    "group": "Trigger and inspect scrapes"
+    }
+  },
+  "geo": {
+    "description": "Show where the pool is",
+    "title": "Geography",
+    "poolSize": "Pool size",
+    "working": "Working",
+    "exitAddresses": "Distinct exit addresses",
+    "countries": "Countries",
+    "byCountry": "By country",
+    "flag": "FLAG",
+    "country": "COUNTRY",
+    "proxies": "PROXIES",
+    "workingColumn": "WORKING"
   },
   "audit": {
     "description": "Show the audit log (admin only)",
     "limit": "maximum rows",
-    "title": "Audit ({count})",
-    "columns": ["WHEN", "ACTOR", "ACTION", "TARGET", "OUTCOME"],
-    "allowed": "ok",
+    "title": "Audit — {count}",
+    "when": "WHEN",
+    "actor": "ACTOR",
+    "action": "ACTION",
+    "target": "TARGET",
+    "outcome": "OUTCOME",
+    "allowed": "allowed",
     "denied": "denied"
   },
   "help": {
@@ -136,15 +156,5 @@
     "description": "Description:",
     "version": "output the version number",
     "option": "display help for command"
-  },
-  "geo": {
-    "description": "Show where the pool is",
-    "title": "Geography",
-    "poolSize": "Pool size",
-    "working": "Working",
-    "exitAddresses": "Distinct exit addresses",
-    "countries": "Countries",
-    "byCountry": "By country ({count})",
-    "columns": ["FLAG", "COUNTRY", "PROXIES", "WORKING"]
   }
 }
