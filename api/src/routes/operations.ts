@@ -372,6 +372,24 @@ export async function operationRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  /* ── Routing ────────────────────────────────────────────────────────── */
+
+  app.get(
+    "/api/v1/routing",
+    {
+      preHandler: [app.authenticate, app.requireRole("viewer")],
+      schema: {
+        tags: ["routing"],
+        summary: "The routing policy in force and the state of the TUN bypass",
+        response: { 200: Ref("RoutingInfo"), 502: Ref("Problem") },
+      },
+    },
+    async (_req, reply) => {
+      const result = await callEngine(reply, () => app.engine.getRouting());
+      return result.ok ? result.value : result.reply;
+    },
+  );
+
   /* ── Telemetry ───────────────────────────────────────────────────────── */
 
   app.get(
