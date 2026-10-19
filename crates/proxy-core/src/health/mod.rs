@@ -1,15 +1,15 @@
 use crate::forwarder::Forwarder;
 use crate::proxy::ProxyInfo;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
-use tracing::warn;
 
 pub struct HealthChecker {
     concurrency: Arc<Semaphore>,
     target_url: String,
-    timeout: std::time::Duration,
+    timeout: Duration,
 }
 
 #[derive(Debug)]
@@ -20,151 +20,243 @@ pub struct HealthResult {
     pub error: Option<String>,
 }
 
+/// Split a target URL into (host, port, path).
+///
+/// The path must be stripped from the host: for `http://httpbin.org/ip` a naive
+/// split leaves the host as `httpbin.org/ip`, which never resolves, so every
+/// proxy is reported dead.
+fn parse_target(url: &str) -> (String, u16, String) {
+    let rest = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+
+    let (authority, path) = match rest.split_once('/') {
+        Some((a, p)) => (a, format!("/{}", p)),
+        None => (rest, "/".to_string()),
+    };
+
+    let path = path
+        .split(['?', '#'])
+        .next()
+        .filter(|p| !p.is_empty())
+        .unwrap_or("/")
+        .to_string();
+
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
+            (h.to_string(), p.parse().unwrap_or(80))
+        }
+        _ => (authority.to_string(), 80),
+    };
+
+    // Strip IPv6 brackets, e.g. `[::1]:8080`
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+
+    (host, port, path)
+}
+
+/// Probe one proxy by tunnelling to the target host through it and requiring a
+/// real HTTP response. A host that merely accepts TCP connections is not a
+/// working proxy and must not be counted as alive.
+async fn check_one(
+    proxy: &ProxyInfo,
+    host: &str,
+    port: u16,
+    path: &str,
+    timeout: Duration,
+) -> HealthResult {
+    let start = Instant::now();
+
+    let mut conn =
+        match tokio::time::timeout(timeout, Forwarder::connect_to(proxy, host, port)).await {
+            Ok(Ok(conn)) => conn,
+            Ok(Err(e)) => {
+                return HealthResult {
+                    proxy_id: proxy.id.clone(),
+                    alive: false,
+                    latency_ms: 0,
+                    error: Some(format!("connect error: {e}")),
+                }
+            }
+            Err(_) => {
+                return HealthResult {
+                    proxy_id: proxy.id.clone(),
+                    alive: false,
+                    latency_ms: 0,
+                    error: Some("connect timeout".into()),
+                }
+            }
+        };
+
+    let authority = if port == 80 {
+        host.to_string()
+    } else {
+        format!("{host}:{port}")
+    };
+
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {authority}\r\n\
+         User-Agent: proxy-switcher-health/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+    );
+
+    match tokio::time::timeout(timeout, conn.write_all(request.as_bytes())).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            return HealthResult {
+                proxy_id: proxy.id.clone(),
+                alive: false,
+                latency_ms: 0,
+                error: Some(format!("write error: {e}")),
+            }
+        }
+        Err(_) => {
+            return HealthResult {
+                proxy_id: proxy.id.clone(),
+                alive: false,
+                latency_ms: 0,
+                error: Some("write timeout".into()),
+            }
+        }
+    }
+
+    let mut buf = Vec::new();
+    match tokio::time::timeout(timeout, conn.read_to_end(&mut buf)).await {
+        Ok(Ok(_)) => {
+            let response = String::from_utf8_lossy(&buf);
+            let status = response.lines().next().unwrap_or_default().trim().to_string();
+            let alive = status.starts_with("HTTP/1.")
+                && status
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|code| code.parse::<u16>().ok())
+                    .is_some_and(|code| (200..400).contains(&code));
+
+            HealthResult {
+                proxy_id: proxy.id.clone(),
+                alive,
+                latency_ms: start.elapsed().as_millis() as u64,
+                error: if alive {
+                    None
+                } else {
+                    Some(format!("unexpected response: {status}"))
+                },
+            }
+        }
+        Ok(Err(e)) => HealthResult {
+            proxy_id: proxy.id.clone(),
+            alive: false,
+            latency_ms: 0,
+            error: Some(format!("read error: {e}")),
+        },
+        Err(_) => HealthResult {
+            proxy_id: proxy.id.clone(),
+            alive: false,
+            latency_ms: 0,
+            error: Some("read timeout".into()),
+        },
+    }
+}
+
 impl HealthChecker {
     pub fn new(concurrency: usize, timeout_secs: u64, target_url: String) -> Self {
         Self {
             concurrency: Arc::new(Semaphore::new(concurrency)),
             target_url,
-            timeout: std::time::Duration::from_secs(timeout_secs),
+            timeout: Duration::from_secs(timeout_secs),
         }
     }
 
+    /// Probe a single proxy, taking one concurrency permit.
     pub async fn check(&self, proxy: &ProxyInfo) -> HealthResult {
         let _permit = self.concurrency.acquire().await.expect("Semaphore closed");
-        let start = Instant::now();
-
-        // Parse target URL into host:port
-        let target = self.target_url.trim_start_matches("http://")
-            .trim_start_matches("https://");
-        let (host, port) = match target.split_once(':') {
-            Some((h, p)) => (h, p.parse::<u16>().unwrap_or(80)),
-            None => (target, 80u16),
-        };
-
-        let result = Forwarder::connect_to(proxy, host, port).await;
-
-        match result {
-            Ok(mut conn) => {
-                // Send HTTP request through proxy
-                let request = format!(
-                    "GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-                );
-                let write_result = tokio::time::timeout(self.timeout, conn.write_all(request.as_bytes())).await;
-
-                match write_result {
-                    Ok(Ok(_)) => {
-                        let mut buf = Vec::new();
-                        let read_result = tokio::time::timeout(self.timeout, conn.read_to_end(&mut buf)).await;
-                        match read_result {
-                            Ok(Ok(_)) => {
-                                let latency = start.elapsed().as_millis() as u64;
-                                let response = String::from_utf8_lossy(&buf);
-                                let alive = response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200");
-                                HealthResult {
-                                    proxy_id: proxy.id.clone(),
-                                    alive,
-                                    latency_ms: latency,
-                                    error: None,
-                                }
-                            }
-                            Ok(Err(e)) => HealthResult {
-                                proxy_id: proxy.id.clone(),
-                                alive: false,
-                                latency_ms: 0,
-                                error: Some(format!("read error: {e}")),
-                            },
-                            Err(_) => HealthResult {
-                                proxy_id: proxy.id.clone(),
-                                alive: false,
-                                latency_ms: 0,
-                                error: Some("read timeout".into()),
-                            },
-                        }
-                    }
-                    Ok(Err(e)) => HealthResult {
-                        proxy_id: proxy.id.clone(),
-                        alive: false,
-                        latency_ms: 0,
-                        error: Some(format!("write error: {e}")),
-                    },
-                    Err(_) => HealthResult {
-                        proxy_id: proxy.id.clone(),
-                        alive: false,
-                        latency_ms: 0,
-                        error: Some("write timeout".into()),
-                    },
-                }
-            }
-            Err(e) => HealthResult {
-                proxy_id: proxy.id.clone(),
-                alive: false,
-                latency_ms: 0,
-                error: Some(format!("connect error: {e}")),
-            },
-        }
+        let (host, port, path) = parse_target(&self.target_url);
+        check_one(proxy, &host, port, &path, self.timeout).await
     }
 
-    pub async fn check_batch(&self, proxies: &[ProxyInfo]) -> Vec<HealthResult> {
-        let mut results = Vec::with_capacity(proxies.len());
+    /// Probe every proxy with bounded concurrency.
+    ///
+    /// `checked` is reset to 0 and incremented as each probe finishes, so callers
+    /// can expose live progress instead of a counter frozen at zero for the
+    /// whole batch.
+    pub async fn check_batch(
+        &self,
+        proxies: &[ProxyInfo],
+        checked: Arc<AtomicUsize>,
+    ) -> Vec<HealthResult> {
+        let total = proxies.len();
+        checked.store(0, Ordering::Relaxed);
 
-        let permits = self.concurrency.clone();
-        let mut handles = Vec::new();
+        // Channel capacity equals the batch size, so probe tasks never block on
+        // the result send and the drain loop is not part of the critical path.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(total.max(1));
 
         for proxy in proxies {
             let proxy = proxy.clone();
-            let permit = permits.clone().acquire_owned().await.expect("Semaphore closed");
-            let target_url = self.target_url.clone();
+            // Take the permit before spawning so at most `concurrency` probes
+            // are in flight at any moment.
+            let permit = self
+                .concurrency
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("Semaphore closed");
+            let (host, port, path) = parse_target(&self.target_url);
             let timeout = self.timeout;
+            let tx = tx.clone();
+            let checked = checked.clone();
 
-            handles.push(tokio::spawn(async move {
+            tokio::spawn(async move {
                 let _permit = permit;
-                let start = Instant::now();
-                let target = target_url.trim_start_matches("http://")
-                    .trim_start_matches("https://");
-                let (host, port) = match target.split_once(':') {
-                    Some((h, p)) => (h, p.parse::<u16>().unwrap_or(80)),
-                    None => (target, 80u16),
-                };
+                let result = check_one(&proxy, &host, port, &path, timeout).await;
+                checked.fetch_add(1, Ordering::Relaxed);
+                let _ = tx.send(result).await;
+            });
+        }
+        drop(tx);
 
-                let result = tokio::time::timeout(timeout, Forwarder::connect_to(&proxy, host, port)).await;
-                match result {
-                    Ok(Ok(mut conn)) => {
-                        let latency = start.elapsed().as_millis() as u64;
-                        let _ = tokio::time::timeout(
-                            std::time::Duration::from_secs(1),
-                            conn.write_all(b"GET / HTTP/1.0\r\nHost: healthcheck\r\nConnection: close\r\n\r\n"),
-                        ).await;
-                        let alive = latency < timeout.as_millis() as u64;
-                        HealthResult {
-                            proxy_id: proxy.id.clone(),
-                            alive,
-                            latency_ms: latency,
-                            error: None,
-                        }
-                    }
-                    Ok(Err(e)) => HealthResult {
-                        proxy_id: proxy.id.clone(),
-                        alive: false,
-                        latency_ms: 0,
-                        error: Some(format!("connect error: {e}")),
-                    },
-                    Err(_) => HealthResult {
-                        proxy_id: proxy.id.clone(),
-                        alive: false,
-                        latency_ms: 0,
-                        error: Some("timeout".into()),
-                    },
-                }
-            }));
+        let mut results = Vec::with_capacity(total);
+        while let Some(result) = rx.recv().await {
+            results.push(result);
         }
 
-        for handle in handles {
-            match handle.await {
-                Ok(r) => results.push(r),
-                Err(e) => warn!("Health check task failed: {e}"),
-            }
-        }
-
+        tracing::info!(
+            "Health check batch: {}/{} probes completed",
+            results.len(),
+            total
+        );
         results
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_target;
+
+    #[test]
+    fn parses_url_with_path() {
+        let (host, port, path) = parse_target("http://httpbin.org/ip");
+        assert_eq!(host, "httpbin.org");
+        assert_eq!(port, 80);
+        assert_eq!(path, "/ip");
+    }
+
+    #[test]
+    fn parses_bare_host_and_port() {
+        assert_eq!(parse_target("example.com"), ("example.com".into(), 80, "/".into()));
+        assert_eq!(
+            parse_target("https://example.com:8443/healthz"),
+            ("example.com".into(), 8443, "/healthz".into())
+        );
+    }
+
+    #[test]
+    fn strips_query_and_ipv6_brackets() {
+        let (host, port, path) = parse_target("http://[::1]:8080/status?x=1");
+        assert_eq!(host, "::1");
+        assert_eq!(port, 8080);
+        assert_eq!(path, "/status");
     }
 }

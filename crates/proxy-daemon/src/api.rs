@@ -5,7 +5,7 @@ use axum::{
     routing::{delete, get, post},
     Router,
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use chrono::{DateTime, Utc};
 use proxy_core::health::HealthChecker;
 use proxy_core::pool::ProxyPool;
@@ -13,6 +13,7 @@ use proxy_core::proxy::{Anonymity, ProxyInfo, ProxyProtocol};
 use proxy_core::router::Router as ProxyRouter;
 use proxy_core::scraper::Scraper;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -21,8 +22,37 @@ pub struct ScrapeState {
     pub last_run: Option<DateTime<Utc>>,
     pub proxies_found: usize,
     pub healthy_count: usize,
-    pub checking_progress: Option<(usize, usize)>, // (checked, total)
+    /// True while a health-check batch is in flight.
+    pub check_running: bool,
+    /// Size of the batch currently being checked.
+    pub check_total: usize,
+    /// Live counter of finished probes, updated by the batch itself.
+    pub checked: Arc<AtomicUsize>,
     pub errors: Vec<String>,
+}
+
+impl ScrapeState {
+    pub fn new(checked: Arc<AtomicUsize>) -> Self {
+        Self {
+            running: false,
+            last_run: None,
+            proxies_found: 0,
+            healthy_count: 0,
+            check_running: false,
+            check_total: 0,
+            checked,
+            errors: Vec::new(),
+        }
+    }
+
+    /// Live (checked, total) progress, or None when no batch is running.
+    pub fn progress(&self) -> Option<(usize, usize)> {
+        if self.check_running {
+            Some((self.checked.load(Ordering::Relaxed), self.check_total))
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -34,6 +64,10 @@ pub struct AppState {
     pub scrape_state: Arc<RwLock<ScrapeState>>,
     pub sources: Arc<RwLock<Vec<String>>>,
     pub ui_dir: std::path::PathBuf,
+    /// Live health-check progress counter, shared with the check loops.
+    pub check_progress: Arc<AtomicUsize>,
+    /// Guards against overlapping full-pool health-check batches.
+    pub check_in_flight: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -62,7 +96,7 @@ async fn ui_handler(State(state): State<AppState>, req: Request) -> Response {
         ui_path.join(path)
     };
 
-    if file_path.starts_with(&ui_path) && file_path.is_file() {
+    if file_path.starts_with(ui_path) && file_path.is_file() {
         let data = match tokio::fs::read(&file_path).await {
             Ok(d) => d,
             Err(_) => return (StatusCode::NOT_FOUND, "Not Found").into_response(),
@@ -264,6 +298,8 @@ async fn trigger_scrape(
     let scraper = state.scraper.clone();
     let health = state.health.clone();
     let scrape_state = state.scrape_state.clone();
+    let check_progress = state.check_progress.clone();
+    let check_in_flight = state.check_in_flight.clone();
 
     tokio::spawn(async move {
         let mut s = scrape_state.write().await;
@@ -276,15 +312,42 @@ async fn trigger_scrape(
                 let count = p.len();
                 info!("Scrape: collected {count} proxies, running health check...");
 
-                let results = health.check_batch(&p).await;
+                // Only one full-pool batch at a time; a second concurrent batch
+                // would just contend for the same concurrency permits.
+                if check_in_flight
+                    .compare_exchange(
+                        false,
+                        true,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    )
+                    .is_err()
+                {
+                    warn!("Health check already running, skipping this batch");
+                    let mut s = scrape_state.write().await;
+                    s.running = false;
+                    s.check_running = false;
+                    return;
+                }
+
+                {
+                    let mut s = scrape_state.write().await;
+                    s.check_running = true;
+                    s.check_total = count;
+                }
+
+                let results = health.check_batch(&p, check_progress).await;
                 let healthy_count = results.iter().filter(|r| r.alive).count();
                 pool.apply_health_results(results).await;
+
+                check_in_flight.store(false, Ordering::SeqCst);
 
                 let mut s = scrape_state.write().await;
                 s.running = false;
                 s.last_run = Some(Utc::now());
                 s.proxies_found = count;
                 s.healthy_count = healthy_count;
+                s.check_running = false;
             }
             Err(e) => {
                 let msg = format!("{e}");
@@ -308,7 +371,7 @@ async fn scrape_status(
         last_run: s.last_run,
         proxies_found: s.proxies_found,
         healthy_count: s.healthy_count,
-        checking_progress: s.checking_progress,
+        checking_progress: s.progress(),
         errors: s.errors.clone(),
     })
 }

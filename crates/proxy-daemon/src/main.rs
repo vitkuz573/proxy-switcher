@@ -9,10 +9,11 @@ use proxy_core::router::Router;
 use proxy_core::scraper::Scraper;
 use proxy_core::storage::Storage;
 use proxy_core::tun_manager::{run_forwarding_loop, TunManager};
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Arc;
 use tokio::signal;
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[derive(Parser)]
 #[command(name = "proxy-daemon", about = "Proxy Switcher daemon")]
@@ -85,14 +86,14 @@ async fn main() -> anyhow::Result<()> {
     // Shared state for API
     let sources = Arc::new(RwLock::new(config.scraper.sources.clone()));
     let scraper = Arc::new(Scraper::new(sources.clone()));
-    let scrape_state = Arc::new(RwLock::new(api::ScrapeState {
-        running: false,
-        last_run: None,
-        proxies_found: 0,
-        healthy_count: 0,
-        checking_progress: None,
-        errors: Vec::new(),
-    }));
+    // Shared health-check bookkeeping: a live progress counter and a guard so
+    // only one full-pool batch runs at a time.
+    let check_progress = Arc::new(AtomicUsize::new(0));
+    let check_in_flight = Arc::new(AtomicBool::new(false));
+
+    let scrape_state = Arc::new(RwLock::new(api::ScrapeState::new(
+        check_progress.clone(),
+    )));
 
     let app_state = api::AppState {
         pool: pool.clone(),
@@ -102,6 +103,8 @@ async fn main() -> anyhow::Result<()> {
         scrape_state: scrape_state.clone(),
         sources: sources.clone(),
         ui_dir: config.daemon.ui_dir.clone(),
+        check_progress: check_progress.clone(),
+        check_in_flight: check_in_flight.clone(),
     };
 
     // Automatic scrape loop
@@ -111,6 +114,9 @@ async fn main() -> anyhow::Result<()> {
         let scraper_clone = scraper.clone();
         let scrape_state_clone = scrape_state.clone();
         let interval = config.scraper.interval_secs;
+        // Pre-clone so the spawned loop owns its own handles.
+        let loop_progress = check_progress.clone();
+        let loop_in_flight = check_in_flight.clone();
 
         tokio::spawn(async move {
             loop {
@@ -140,32 +146,42 @@ async fn main() -> anyhow::Result<()> {
 
                 info!("Auto scrape: {} proxies, running health check...", proxies.len());
 
-                {
-                    let mut with_score = proxies.clone();
-                    for p in &mut with_score {
-                        if p.score == 0.0 {
-                            p.score = 50.0;
-                        }
-                    }
-                    pool_clone.update(with_score).await;
-                }
+// Score stays 0 until a probe actually confirms the proxy, so the pool's
+                // "healthy" count reflects real checks instead of pool size.
+                pool_clone.update(proxies.clone()).await;
                 info!("Auto scrape done: {} in pool", pool_clone.all().await.len());
-
-                {
-                    let mut s = scrape_state_clone.write().await;
-                    s.checking_progress = Some((0, proxies.len()));
-                }
 
                 let hc = health_clone.clone();
                 let pc = pool_clone.clone();
                 let sc = scrape_state_clone.clone();
+                let progress = loop_progress.clone();
+                let in_flight = loop_in_flight.clone();
                 let total = proxies.len();
+
+                // Skip this batch if another full-pool check is already running;
+                // otherwise batches pile up and contend for the same permits.
+                if in_flight
+                    .compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst)
+                    .is_err()
+                {
+                    warn!("Health check already in progress, skipping scrape batch");
+                    tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+                    continue;
+                }
+
+                {
+                    let mut s = sc.write().await;
+                    s.check_running = true;
+                    s.check_total = total;
+                }
+
                 tokio::spawn(async move {
-                    let results = hc.check_batch(&proxies).await;
+                    let results = hc.check_batch(&proxies, progress).await;
                     let healthy_count = results.iter().filter(|r| r.alive).count();
                     pc.apply_health_results(results).await;
+                    in_flight.store(false, std::sync::atomic::Ordering::SeqCst);
                     let mut s = sc.write().await;
-                    s.checking_progress = None;
+                    s.check_running = false;
                     s.healthy_count = healthy_count;
                     info!("Health check done: {healthy_count} alive from {total}");
                 });
@@ -180,6 +196,9 @@ async fn main() -> anyhow::Result<()> {
         let pool_clone = pool.clone();
         let health_clone = health.clone();
         let health_config = config.health.clone();
+        let progress = check_progress.clone();
+        let in_flight = check_in_flight.clone();
+        let scrape_state_clone = scrape_state.clone();
 
         tokio::spawn(async move {
             loop {
@@ -193,11 +212,32 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
-                info!("Re-checking {} pool proxies...", proxies.len());
-                let results = health_clone.check_batch(&proxies).await;
-                pool_clone.apply_health_results(results).await;
+                // Yield to a batch that is already running instead of
+                // duplicating the full-pool sweep.
+                if in_flight
+                    .compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst)
+                    .is_err()
+                {
+                    info!("Health check already in progress, skipping re-check");
+                    continue;
+                }
 
-                let healthy = pool_clone.healthy_count().await;
+                info!("Re-checking {} pool proxies...", proxies.len());
+                {
+                    let mut s = scrape_state_clone.write().await;
+                    s.check_running = true;
+                    s.check_total = proxies.len();
+                }
+
+                let results = health_clone.check_batch(&proxies, progress.clone()).await;
+                let healthy = results.iter().filter(|r| r.alive).count();
+                pool_clone.apply_health_results(results).await;
+                in_flight.store(false, std::sync::atomic::Ordering::SeqCst);
+
+                let mut s = scrape_state_clone.write().await;
+                s.check_running = false;
+                s.healthy_count = healthy;
+
                 info!("Re-check complete: {healthy} alive");
             }
         });

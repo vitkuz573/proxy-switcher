@@ -59,20 +59,38 @@ impl ProxyPool {
 
         let mut inner = self.inner.write().await;
 
+        // Index by id once: a linear `find` per result is O(n*m), which becomes
+        // the dominant cost on a pool of tens of thousands of proxies.
+        let mut index: std::collections::HashMap<String, usize> = inner
+            .proxies
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.id.clone(), i))
+            .collect();
+
         // Merge health data into existing proxy records
         for h in &healthy {
-            if let Some(existing) = inner.proxies.iter_mut().find(|p| p.id == h.id) {
-                existing.latency_ms = h.latency_ms;
-                existing.score = h.score;
-                existing.last_checked = h.last_checked;
-            } else {
-                inner.proxies.push(h.clone());
+            match index.get(&h.id) {
+                Some(&i) => {
+                    let existing = &mut inner.proxies[i];
+                    existing.latency_ms = h.latency_ms;
+                    existing.score = h.score;
+                    existing.last_checked = h.last_checked;
+                }
+                None => {
+                    index.insert(h.id.clone(), inner.proxies.len());
+                    inner.proxies.push(h.clone());
+                }
             }
         }
 
         // Remove dead proxies
-        let dead_ids: Vec<String> = results.iter().filter(|r| !r.alive).map(|r| r.proxy_id.clone()).collect();
-        inner.proxies.retain(|p| !dead_ids.contains(&p.id));
+        let dead_ids: std::collections::HashSet<&str> = results
+            .iter()
+            .filter(|r| !r.alive)
+            .map(|r| r.proxy_id.as_str())
+            .collect();
+        inner.proxies.retain(|p| !dead_ids.contains(p.id.as_str()));
 
         // Adjust active_index if needed
         if let Some(idx) = inner.active_index {
