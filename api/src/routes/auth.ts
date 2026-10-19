@@ -352,7 +352,9 @@ export async function authRoutes(app: FastifyInstance, opts: { secureCookies: bo
         summary: 'Create the first administrator (refused once any user exists)',
         body: Type.Object({
           email: Type.String({ format: 'email' }),
-          password: Type.String({ minLength: 12, maxLength: 200 }),
+          // Floor lowered to 8 by operator decision (2026-10-19). The stored
+          // hash is argon2id regardless; this only bounds the input length.
+          password: Type.String({ minLength: 8, maxLength: 200 }),
         }),
         response: { 201: { type: 'object', properties: { user: Ref('User') } }, 409: errorSchema() },
       },

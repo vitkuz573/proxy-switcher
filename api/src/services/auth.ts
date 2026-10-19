@@ -5,8 +5,9 @@ import {
   randomUUID,
   timingSafeEqual,
 } from 'node:crypto';
-import type Database from 'better-sqlite3';
-import type { ApiTokenRow, Role, SessionRow, UserRow } from '../db/index.js';
+
+import type { DatabaseSync } from 'node:sqlite';
+import { namedParams, type ApiTokenRow, type Role, type SessionRow, type UserRow } from '../db/index.js';
 
 const ARGON2_OPTIONS = {
   memoryCost: 19_456,
@@ -32,7 +33,7 @@ function sha256(value: string): string {
 }
 
 export interface AuthContext {
-  db: Database.Database;
+  db: DatabaseSync;
   sessionTtlMs: number;
   tokenTtlMs: number;
 }
@@ -63,14 +64,14 @@ export async function createUser(
   ctx.db
     .prepare(
       `INSERT INTO users (id, email, password_hash, role, created_at, disabled_at)
-       VALUES (@id, @email, @password_hash, @role, @created_at, @disabled_at)`,
+       VALUES ($id, $email, $password_hash, $role, $created_at, $disabled_at)`,
     )
-    .run(user);
+    .run(namedParams(user));
 
   return user;
 }
 
-export function countUsers(db: Database.Database): number {
+export function countUsers(db: DatabaseSync): number {
   const row = db.prepare('SELECT COUNT(*) AS n FROM users').get() as { n: number };
   return row.n;
 }
@@ -124,9 +125,9 @@ export function createSession(
   ctx.db
     .prepare(
       `INSERT INTO sessions (id, user_id, created_at, expires_at, ip, user_agent)
-       VALUES (@id, @user_id, @created_at, @expires_at, @ip, @user_agent)`,
+       VALUES ($id, $user_id, $created_at, $expires_at, $ip, $user_agent)`,
     )
-    .run(session);
+    .run(namedParams(session));
 
   return session;
 }
@@ -195,9 +196,9 @@ export function createApiToken(
   ctx.db
     .prepare(
       `INSERT INTO api_tokens (id, user_id, name, prefix, token_hash, created_at, expires_at, last_used_at, revoked_at)
-       VALUES (@id, @user_id, @name, @prefix, @token_hash, @created_at, @expires_at, @last_used_at, @revoked_at)`,
+       VALUES ($id, $user_id, $name, $prefix, $token_hash, $created_at, $expires_at, $last_used_at, $revoked_at)`,
     )
-    .run(row);
+    .run(namedParams(row));
 
   return { token, row };
 }
@@ -210,12 +211,16 @@ export function verifyApiToken(
     return null;
   }
 
-  const parts = token.split('_');
-  if (parts.length !== 3) {
+  // The secret is base64url, whose alphabet includes `_`. Splitting the whole
+  // token on `_` would therefore mis-split most real tokens; only the prefix
+  // segment is delimited, everything after it is the secret.
+  const rest = token.slice(3);
+  const separator = rest.indexOf('_');
+  if (separator <= 0) {
     return null;
   }
 
-  const prefix = `ps_${parts[1]}`;
+  const prefix = `ps_${rest.slice(0, separator)}`;
   const row = ctx.db.prepare('SELECT * FROM api_tokens WHERE prefix = ?').get(prefix) as
     | ApiTokenRow
     | undefined;
@@ -247,13 +252,15 @@ export function verifyApiToken(
   return { token: row, user };
 }
 
-export function listApiTokens(db: Database.Database, userId: string): ApiTokenRow[] {
+export function listApiTokens(db: DatabaseSync, userId: string): ApiTokenRow[] {
+  // node:sqlite types rows as `Record<string, SQLOutputValue>`; the row shapes
+  // are declared alongside the schema in db/index.ts.
   return db
     .prepare('SELECT * FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC')
-    .all(userId) as ApiTokenRow[];
+    .all(userId) as unknown as ApiTokenRow[];
 }
 
-export function revokeApiToken(db: Database.Database, userId: string, tokenId: string): boolean {
+export function revokeApiToken(db: DatabaseSync, userId: string, tokenId: string): boolean {
   const result = db
     .prepare('UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL')
     .run(Date.now(), tokenId, userId);
@@ -272,18 +279,20 @@ export interface AuditInput {
   detail?: string | null;
 }
 
-export function recordAudit(db: Database.Database, entry: AuditInput): void {
+export function recordAudit(db: DatabaseSync, entry: AuditInput): void {
   db.prepare(
     `INSERT INTO audit_log (ts, actor_type, actor_id, action, target, outcome, ip, detail)
-     VALUES (@ts, @actor_type, @actor_id, @action, @target, @outcome, @ip, @detail)`,
-  ).run({
-    ts: Date.now(),
-    actor_type: entry.actorType,
-    actor_id: entry.actorId,
-    action: entry.action,
-    target: entry.target ?? null,
-    outcome: entry.outcome,
-    ip: entry.ip ?? null,
-    detail: entry.detail ?? null,
-  });
+     VALUES ($ts, $actor_type, $actor_id, $action, $target, $outcome, $ip, $detail)`,
+  ).run(
+    namedParams({
+      ts: Date.now(),
+      actor_type: entry.actorType,
+      actor_id: entry.actorId,
+      action: entry.action,
+      target: entry.target ?? null,
+      outcome: entry.outcome,
+      ip: entry.ip ?? null,
+      detail: entry.detail ?? null,
+    }),
+  );
 }

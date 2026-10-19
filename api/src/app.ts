@@ -9,11 +9,12 @@ import Fastify, {
   type FastifyInstance,
   type FastifyServerOptions,
 } from 'fastify';
-import type Database from 'better-sqlite3';
+
 import type { Config } from './config.js';
 import { EngineClient, isEngineHealthy } from './engine/client.js';
 import { authPlugin } from './plugins/auth.js';
 import { errorBody } from './plugins/errors.js';
+import type { DatabaseSync } from 'node:sqlite';
 import { enginePlugin } from './plugins/engine.js';
 import { rbacPlugin } from './plugins/rbac.js';
 import { authRoutes } from './routes/auth.js';
@@ -45,7 +46,7 @@ const REF_RESOLVER = {
 
 export interface BuildAppOptions {
   config: Config;
-  db: Database.Database;
+  db: DatabaseSync;
 }
 
 export async function buildApp({ config, db }: BuildAppOptions): Promise<FastifyInstance> {

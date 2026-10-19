@@ -24,7 +24,8 @@ const schema = z.object({
 
   /** First-run administrator. Only used when the users table is empty. */
   BOOTSTRAP_ADMIN_EMAIL: z.string().email().optional(),
-  BOOTSTRAP_ADMIN_PASSWORD: z.string().min(12).optional(),
+  /** Minimum lowered to 8 by operator decision (2026-10-19). */
+  BOOTSTRAP_ADMIN_PASSWORD: z.string().min(8).optional(),
 
   SESSION_TTL_HOURS: z.coerce.number().int().min(1).max(24 * 30).default(24),
   API_TOKEN_TTL_DAYS: z.coerce.number().int().min(1).max(365).default(90),

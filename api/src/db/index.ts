@@ -1,6 +1,13 @@
-import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
+
+/**
+ * Uses Node's built-in SQLite rather than a native addon. A compiled binding
+ * pins the deployment to one Node ABI — a version bump turns into a rebuild
+ * that has to succeed before the service can start at all. The built-in module
+ * has no such coupling.
+ */
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
@@ -52,6 +59,17 @@ CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor_id, ts DESC);
 `;
 
+export type Database = DatabaseSync;
+
+/**
+ * `node:sqlite` types named parameters as a bare string-keyed record, which
+ * domain rows do not satisfy because they have no index signature. Spreading
+ * into a fresh object keeps every call site free of casts.
+ */
+export function namedParams<T extends object>(row: T): Record<string, SQLInputValue> {
+  return { ...row } as unknown as Record<string, SQLInputValue>;
+}
+
 export type Role = 'admin' | 'operator' | 'viewer';
 
 export interface UserRow {
@@ -84,24 +102,29 @@ export interface ApiTokenRow {
   revoked_at: number | null;
 }
 
-export function openDatabase(path: string): Database.Database {
+export function openDatabase(path: string): DatabaseSync {
   mkdirSync(dirname(path), { recursive: true });
-  const db = new Database(path);
+  const db = new DatabaseSync(path);
 
   // WAL keeps the read-heavy API responsive while the audit log is written.
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-  db.pragma('busy_timeout = 5000');
+  db.exec('PRAGMA journal_mode = WAL');
+  db.exec('PRAGMA foreign_keys = ON');
+  db.exec('PRAGMA busy_timeout = 5000');
 
   db.exec(SCHEMA);
   return db;
 }
 
 /** Drop expired sessions and past-dated tokens. Called on boot and hourly. */
-export function pruneExpired(db: Database.Database, now = Date.now()): { sessions: number; tokens: number } {
-  const sessions = db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(now).changes;
-  const tokens = db
-    .prepare('DELETE FROM api_tokens WHERE expires_at IS NOT NULL AND expires_at < ?')
-    .run(now).changes;
+export function pruneExpired(
+  db: DatabaseSync,
+  now = Date.now(),
+): { sessions: number; tokens: number } {
+  const sessions = Number(db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(now).changes);
+  const tokens = Number(
+    db
+      .prepare('DELETE FROM api_tokens WHERE expires_at IS NOT NULL AND expires_at < ?')
+      .run(now).changes,
+  );
   return { sessions, tokens };
 }
