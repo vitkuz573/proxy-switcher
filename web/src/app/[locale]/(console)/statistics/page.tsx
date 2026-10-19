@@ -45,10 +45,22 @@ export default async function StatisticsPage({ params }: Props) {
       </header>
 
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <Metric label={t("metrics.pool")} value={statistics.pool_size} />
-        <Metric label={t("metrics.working")} value={statistics.working} />
-        <Metric label={t("metrics.tunnel")} value={statistics.tunnel_capable} />
-        <Metric label={t("metrics.due")} value={statistics.due} />
+        <Metric
+          label={t("metrics.pool")}
+          value={statistics.pool_size}
+          hint={t("metrics.poolHint")}
+        />
+        <Metric
+          label={t("metrics.working")}
+          value={statistics.working}
+          hint={t("metrics.poolHint")}
+        />
+        <Metric
+          label={t("metrics.tunnel")}
+          value={statistics.tunnel_capable}
+          hint={t("metrics.poolHint")}
+        />
+        <Metric label={t("metrics.due")} value={statistics.due} hint={t("metrics.poolHint")} />
       </section>
 
       <PoolStatisticsCharts statistics={statistics} />
@@ -63,13 +75,13 @@ export default async function StatisticsPage({ params }: Props) {
   );
 }
 
-function Metric({ label, value }: { label: string; value: number }) {
+function Metric({ label, value, hint }: { label: string; value: number; hint: string }) {
   return (
     <Card>
       <CardContent className="grid gap-1">
         <div className="flex items-center justify-between text-sm text-muted-foreground">
           <span>{label}</span>
-          <Badge variant="outline">пул</Badge>
+          <Badge variant="outline">{hint}</Badge>
         </div>
         <p className="text-3xl font-semibold tabular-nums">{value.toLocaleString()}</p>
       </CardContent>

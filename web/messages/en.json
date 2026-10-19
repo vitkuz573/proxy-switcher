@@ -98,7 +98,8 @@
       "country": "Country",
       "submit": "Add",
       "portRange": "Port must be between 1 and 65535",
-      "failed": "Could not add the proxy"
+      "failed": "Could not add the proxy",
+      "countryPlaceholder": "optional"
     },
     "switchTo": "Switch to this proxy",
     "removeAction": "Remove"
@@ -146,7 +147,8 @@
       "pool": "In the pool",
       "working": "Working",
       "tunnel": "With a tunnel",
-      "due": "Waiting for a probe"
+      "due": "Waiting for a probe",
+      "poolHint": "pool"
     },
     "charts": {
       "historyTitle": "Pool over time",
@@ -162,7 +164,10 @@
       "pool": "In the pool",
       "working": "Working",
       "proxies": "Proxies",
-      "historyEmpty": "The history is filling up: the first sample is a minute away."
+      "historyEmpty": "The history is filling up: the first sample is a minute away.",
+      "latencyRange": "{from}–{to} ms",
+      "latencyRangeOpen": "{from} ms and above",
+      "latencySuffix": "ms"
     },
     "exitAddresses": "{count} distinct exit addresses — that is how many proxies there really are among {total} entries."
   },

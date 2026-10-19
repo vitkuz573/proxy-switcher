@@ -106,7 +106,7 @@ export function ProxiesTable({
     try {
       await api.deleteProxy(id);
       setProxies((prev) => prev.filter((p) => p.id !== id));
-      toast.success("ProxyRecord removed");
+      toast.success(t("removed"));
       refresh();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t("removeFailed"));
@@ -209,7 +209,7 @@ export function ProxiesTable({
                     {canWrite ? (
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="icon-sm" aria-label="Row actions">
+                          <Button variant="ghost" size="icon-sm" aria-label={t("columns.actions")}>
                             <MoreHorizontal />
                           </Button>
                         </DropdownMenuTrigger>

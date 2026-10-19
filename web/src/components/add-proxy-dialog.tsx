@@ -143,7 +143,7 @@ export function AddProxyDialog({
               <Label htmlFor="country">{t("country")}</Label>
               <Input
                 id="country"
-                placeholder="optional"
+                placeholder={t("countryPlaceholder")}
                 value={country}
                 onChange={(e) => setCountry(e.target.value)}
               />

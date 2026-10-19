@@ -59,10 +59,16 @@ pub struct CountryCount {
 }
 
 /// A latency range and how many proxies fall into it.
+///
+/// The boundaries are numbers rather than a label: the engine does not know
+/// what language the reader has, and a label baked into the answer would be
+/// shown in the wrong one.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LatencyBucket {
-    /// The range, in milliseconds, as it is shown.
-    pub range: String,
+    /// The lower bound, in milliseconds.
+    pub from_ms: u64,
+    /// The upper bound, in milliseconds. `None` for the open-ended range.
+    pub to_ms: Option<u64>,
     pub count: usize,
 }
 
@@ -77,14 +83,14 @@ pub struct HistorySample {
 }
 
 /// The latency ranges the distribution is counted in.
-const LATENCY_BUCKETS: &[(&str, u64, u64)] = &[
-    ("0-100 ms", 0, 100),
-    ("100-300 ms", 100, 300),
-    ("300-600 ms", 300, 600),
-    ("600-1000 ms", 600, 1000),
-    ("1000-2000 ms", 1000, 2000),
-    ("2000-5000 ms", 2000, 5000),
-    ("5000 ms и больше", 5000, u64::MAX),
+const LATENCY_BUCKETS: &[(u64, Option<u64>)] = &[
+    (0, Some(100)),
+    (100, Some(300)),
+    (300, Some(600)),
+    (600, Some(1000)),
+    (1000, Some(2000)),
+    (2000, Some(5000)),
+    (5000, None),
 ];
 
 impl ProxyPool {
@@ -152,7 +158,9 @@ impl ProxyPool {
             if let Some(latency_ms) = proxy.latency_ms {
                 let index = LATENCY_BUCKETS
                     .iter()
-                    .position(|(_, low, high)| latency_ms >= *low && latency_ms < *high)
+                    .position(|(from, to)| {
+                        latency_ms >= *from && to.is_none_or(|upper| latency_ms < upper)
+                    })
                     .unwrap_or(LATENCY_BUCKETS.len() - 1);
                 latency[index] += 1;
             }
@@ -208,8 +216,9 @@ impl ProxyPool {
             latency: LATENCY_BUCKETS
                 .iter()
                 .zip(latency)
-                .map(|((range, _, _), count)| LatencyBucket {
-                    range: (*range).to_string(),
+                .map(|((from, to), count)| LatencyBucket {
+                    from_ms: *from,
+                    to_ms: *to,
                     count,
                 })
                 .collect(),

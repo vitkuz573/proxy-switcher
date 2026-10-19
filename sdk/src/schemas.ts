@@ -224,7 +224,8 @@ export const PoolStatisticsSchema = Type.Object(
     ),
     latency: Type.Array(
       Type.Object({
-        range: Type.String(),
+        from_ms: Type.Integer(),
+        to_ms: Type.Union([Type.Integer(), Type.Null()]),
         count: Type.Integer(),
       }),
     ),

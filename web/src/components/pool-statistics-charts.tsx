@@ -97,8 +97,16 @@ export function PoolStatisticsCharts({ statistics }: { statistics: PoolStatistic
     count: entry.count,
   }));
 
+  // The range is named here, in the language of the reader: the engine reports
+  // the boundaries and knows nothing about languages.
   const latency = statistics.latency.map((entry) => ({
-    range: entry.range,
+    range:
+      entry.to_ms === null
+        ? t("latencyRangeOpen", { from: format.number(entry.from_ms) })
+        : t("latencyRange", {
+            from: format.number(entry.from_ms),
+            to: format.number(entry.to_ms),
+          }),
     count: entry.count,
   }));
 
