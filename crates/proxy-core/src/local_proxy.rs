@@ -132,6 +132,15 @@ pub struct LocalProxyState {
     pub bytes_in: u64,
 }
 
+/// A proxy that was used lately, and the address it left from.
+#[derive(Debug, Clone)]
+struct UsedProxy {
+    /// The entry in the pool.
+    id: String,
+    /// The address the traffic left from.
+    exit_ip: Option<std::net::IpAddr>,
+}
+
 /// A client that holds a proxy of its own.
 #[derive(Debug, Clone)]
 struct Session {
@@ -181,7 +190,11 @@ pub struct LocalProxy {
     /// choice, until the client is given a new one.
     avoided: Arc<tokio::sync::Mutex<HashMap<String, HashSet<String>>>>,
     /// The proxies used lately, so a rotation spreads over the pool.
-    recent: Arc<tokio::sync::Mutex<VecDeque<String>>>,
+    ///
+    /// What is remembered is the address the traffic left from, not only the
+    /// entry: the same server is published under many names, and two entries
+    /// of it are one address as far as the site is concerned.
+    recent: Arc<tokio::sync::Mutex<VecDeque<UsedProxy>>>,
     /// The credentials clients authenticate with.
     credentials: Option<Arc<CredentialStore>>,
 }
@@ -596,16 +609,12 @@ impl LocalProxy {
         }
 
         // The window is over: another proxy takes the place.
-        let mut avoid = self.recently_used().await;
+        let (mut avoid, avoid_exits) = self.recently_used().await;
         if let Some(dropped) = self.avoided.lock().await.remove(policy_name) {
             avoid.extend(dropped);
         }
 
-        let Some(proxy) = self
-            .pool
-            .best_matching(&avoid, &HashSet::new(), policy)
-            .await
-        else {
+        let Some(proxy) = self.pool.best_matching(&avoid, &avoid_exits, policy).await else {
             return self.pool.active().await.filter(|p| policy.allows(p));
         };
 
@@ -617,37 +626,48 @@ impl LocalProxy {
             },
         );
 
-        self.remember(&proxy.id).await;
+        self.remember(&proxy).await;
         Some(proxy)
     }
 
     /// A proxy of this request's own.
     async fn per_request_proxy(&self, policy: &ProxyPolicy) -> Option<ProxyInfo> {
-        let avoid = self.recently_used().await;
-        let Some(proxy) = self
-            .pool
-            .best_matching(&avoid, &HashSet::new(), policy)
-            .await
-        else {
+        let (avoid, avoid_exits) = self.recently_used().await;
+        let Some(proxy) = self.pool.best_matching(&avoid, &avoid_exits, policy).await else {
             return self.pool.active().await.filter(|p| policy.allows(p));
         };
 
-        self.remember(&proxy.id).await;
+        self.remember(&proxy).await;
         Some(proxy)
     }
 
-    /// The proxies used lately.
+    /// The proxies used lately, and the addresses they left from.
     ///
     /// The traffic is spread over the pool: a proxy that was just used is
-    /// not used again straight away, so the exit address changes.
-    async fn recently_used(&self) -> HashSet<String> {
-        self.recent.lock().await.iter().cloned().collect()
+    /// not used again straight away, and neither is the address it left
+    /// from, so the address the site sees changes.
+    async fn recently_used(&self) -> (HashSet<String>, HashSet<std::net::IpAddr>) {
+        let recent = self.recent.lock().await;
+        let mut entries = HashSet::new();
+        let mut exits = HashSet::new();
+
+        for used in recent.iter() {
+            entries.insert(used.id.clone());
+            if let Some(exit) = used.exit_ip {
+                exits.insert(exit);
+            }
+        }
+
+        (entries, exits)
     }
 
     /// Remember that a proxy was used.
-    async fn remember(&self, id: &str) {
+    async fn remember(&self, proxy: &ProxyInfo) {
         let mut recent = self.recent.lock().await;
-        recent.push_back(id.to_string());
+        recent.push_back(UsedProxy {
+            id: proxy.id.clone(),
+            exit_ip: proxy.exit_ip,
+        });
         while recent.len() > 16 {
             recent.pop_front();
         }

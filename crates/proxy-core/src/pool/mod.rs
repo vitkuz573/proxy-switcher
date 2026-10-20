@@ -706,18 +706,6 @@ impl ProxyPool {
         let inner = self.inner.read().await;
         let now = chrono::Utc::now();
 
-        {
-            let mut top: Vec<(f64, String)> = inner
-                .proxies
-                .iter()
-                .filter(|p| p.last_success.is_some() && p.consecutive_failures == 0)
-                .map(|p| (effective_score(p, now), p.id.clone()))
-                .collect();
-            top.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            top.truncate(3);
-            tracing::debug!(?top, "the pool's best candidates");
-        }
-
         inner
             .proxies
             .iter()
