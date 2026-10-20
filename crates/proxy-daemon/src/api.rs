@@ -314,6 +314,10 @@ pub fn build_router(state: AppState) -> Router {
             get(list_credentials).post(create_credential),
         )
         .route("/api/v1/credentials/{username}", delete(delete_credential))
+        .route(
+            "/api/v1/credentials/{username}/rotate",
+            post(rotate_credential),
+        )
         // Proxies
         .route("/api/v1/proxies", get(list_proxies).post(create_proxy))
         .route("/api/v1/proxies/{id}", get(get_proxy).delete(delete_proxy))
@@ -703,6 +707,56 @@ async fn create_credential(
             password: credential.password,
         }),
     ))
+}
+
+/// Turn a sticky session over.
+async fn rotate_credential(
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+) -> Result<Json<Rotation>, ApiError> {
+    let store = state.credentials.as_ref().ok_or_else(|| {
+        ApiError::conflict("The engine has no database, so it holds no credentials")
+    })?;
+
+    let Some(credential) = store
+        .list_credentials()
+        .await
+        .map_err(|e| ApiError::internal(format!("could not read the credentials: {e}")))?
+        .into_iter()
+        .find(|credential| credential.username == username)
+    else {
+        return Err(ApiError::not_found(format!(
+            "No credential named {username}"
+        )));
+    };
+
+    // The pin the client holds is dropped, and so is the proxy in front for
+    // the policy, when the policy shares one between its clients.
+    let session = state.local_proxy.rotate_session(&username).await;
+    let policy = state.local_proxy.rotate_policy(&credential.policy).await;
+
+    let current = state.local_proxy.state().await.current_proxy;
+
+    Ok(Json(Rotation {
+        username,
+        policy: credential.policy,
+        rotated: session || policy,
+        current_proxy: current,
+    }))
+}
+
+/// A credential whose session was turned over.
+#[derive(Serialize)]
+struct Rotation {
+    /// The credential the session belonged to.
+    username: String,
+    /// The policy the credential carries.
+    policy: String,
+    /// Whether anything was actually held: a session that had already run
+    /// out rotates nothing.
+    rotated: bool,
+    /// The proxy in front now.
+    current_proxy: Option<String>,
 }
 
 /// Remove a credential.

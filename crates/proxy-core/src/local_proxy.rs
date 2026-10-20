@@ -151,6 +151,12 @@ pub struct LocalProxy {
     sessions: Arc<tokio::sync::Mutex<HashMap<String, Session>>>,
     /// The proxies in front, for rotation by time.
     slots: Arc<tokio::sync::Mutex<HashMap<String, Slot>>>,
+    /// The proxies a client was turned away from.
+    ///
+    /// A rotation that gives the client the same proxy again is not a
+    /// rotation: the proxy it was turned away from is left out of the next
+    /// choice, until the client is given a new one.
+    avoided: Arc<tokio::sync::Mutex<HashMap<String, HashSet<String>>>>,
     /// The proxies used lately, so a rotation spreads over the pool.
     recent: Arc<tokio::sync::Mutex<VecDeque<String>>>,
     /// The credentials clients authenticate with.
@@ -174,6 +180,7 @@ impl LocalProxy {
             sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             slots: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             recent: Arc::new(tokio::sync::Mutex::new(VecDeque::new())),
+            avoided: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             credentials,
         }
     }
@@ -346,6 +353,64 @@ impl LocalProxy {
         }
     }
 
+    /// Drop the proxy a client is pinned to.
+    ///
+    /// The next request the client makes is carried by another proxy: the
+    /// pin is gone, and the client is given a fresh one from the pool. This
+    /// is the operator's way of turning a sticky session over without
+    /// waiting for its window to run out.
+    pub async fn rotate_session(&self, identity: &str) -> bool {
+        let dropped = self
+            .sessions
+            .lock()
+            .await
+            .remove(identity)
+            .map(|session| session.proxy_id);
+
+        let Some(proxy_id) = dropped else {
+            return false;
+        };
+
+        // The proxy the client was turned away from is left out of the next
+        // choice. A rotation that gives the client the same proxy again is
+        // not a rotation.
+        self.avoided
+            .lock()
+            .await
+            .entry(identity.to_string())
+            .or_default()
+            .insert(proxy_id);
+
+        true
+    }
+
+    /// Drop the proxy in front for a policy.
+    ///
+    /// A rotation by time shares one proxy between the clients of a policy,
+    /// so turning it over is a decision about the policy, not about one
+    /// client.
+    pub async fn rotate_policy(&self, policy: &str) -> bool {
+        let dropped = self
+            .slots
+            .lock()
+            .await
+            .remove(policy)
+            .and_then(|slot| slot.proxy_id);
+
+        let Some(proxy_id) = dropped else {
+            return false;
+        };
+
+        self.avoided
+            .lock()
+            .await
+            .entry(policy.to_string())
+            .or_default()
+            .insert(proxy_id);
+
+        true
+    }
+
     /// The proxy a client's traffic is carried by.
     ///
     /// How it is chosen is the policy's decision: a sticky session keeps the
@@ -380,11 +445,16 @@ impl LocalProxy {
         }
 
         // A client that is not pinned is given a proxy that no other client
-        // holds, so the sessions do not all share one exit address.
-        let pinned: HashSet<String> = sessions
+        // holds, so the sessions do not all share one exit address, and one it
+        // was just turned away from.
+        let mut pinned: HashSet<String> = sessions
             .values()
             .map(|session| session.proxy_id.clone())
             .collect();
+
+        if let Some(avoided) = self.avoided.lock().await.remove(identity) {
+            pinned.extend(avoided);
+        }
 
         let Some(proxy) = self.pool.best_matching(&pinned, policy).await else {
             return self.pool.active().await.filter(|p| policy.allows(p));
@@ -438,7 +508,11 @@ impl LocalProxy {
         }
 
         // The window is over: another proxy takes the place.
-        let avoid = self.recently_used().await;
+        let mut avoid = self.recently_used().await;
+        if let Some(dropped) = self.avoided.lock().await.remove(policy_name) {
+            avoid.extend(dropped);
+        }
+
         let Some(proxy) = self.pool.best_matching(&avoid, policy).await else {
             return self.pool.active().await.filter(|p| policy.allows(p));
         };

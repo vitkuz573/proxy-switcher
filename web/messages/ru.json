@@ -223,6 +223,9 @@
     "remove": "Удалить",
     "removeTitle": "Удалить кред?",
     "removeDescription": "Кред {name} перестанет приниматься сразу.",
-    "removed": "Кред {name} удалён."
+    "removed": "Кред {name} удалён.",
+    "rotate": "Перекрутить сессию",
+    "rotated": "Сессия {name} перекручена.",
+    "rotateNothing": "Сессия {name} уже истекла."
   }
 }

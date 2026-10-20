@@ -2,6 +2,7 @@ import type {
   ApiToken,
   AuditEvent,
   CreatedApiToken,
+  CredentialRotation,
   LocalProxy,
   PoolStatistics,
   Problem,
@@ -339,6 +340,15 @@ export class ProxySwitcherClient {
   /** Remove a credential. */
   deleteCredential(username: string): Promise<void> {
     return this.request("DELETE", `/api/v1/credentials/${encodeURIComponent(username)}`);
+  }
+
+  /**
+   * Turn a sticky session over.
+   *
+   * The client keeps a different proxy from its next request on.
+   */
+  rotateCredential(username: string): Promise<CredentialRotation> {
+    return this.request("POST", `/api/v1/credentials/${encodeURIComponent(username)}/rotate`);
   }
 }
 

@@ -626,6 +626,29 @@ credentials
   });
 
 credentials
+  .command("rotate")
+  .description(t("credentials.rotate.description"))
+  .argument("<name>", t("credentials.rotate.name"))
+  .action(async (name: string) => {
+    await runCli(async () => {
+      const rotation = await cliCall(() => client().rotateCredential(name));
+
+      if (emit(rotation)) {
+        return;
+      }
+
+      if (rotation.rotated) {
+        console.log(`  ${ok("✓")} ${t("credentials.rotate.done", { name })}`);
+        if (rotation.current_proxy) {
+          console.log(`  ${muted(t("credentials.rotate.proxy"))}  ${bold(rotation.current_proxy)}`);
+        }
+      } else {
+        console.log(`  ${muted(t("credentials.rotate.nothing", { name }))}`);
+      }
+    });
+  });
+
+credentials
   .command("remove")
   .description(t("credentials.remove.description"))
   .argument("<name>", t("credentials.remove.name"))

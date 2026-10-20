@@ -588,6 +588,27 @@ export async function operationRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  app.post(
+    "/api/v1/credentials/:username/rotate",
+    {
+      preHandler: [app.authenticate, app.requireRole("operator")],
+      schema: {
+        tags: ["local-proxy"],
+        summary: "Turn a sticky session over",
+        params: Type.Object({ username: Type.String() }),
+        response: { 200: Ref("CredentialRotation"), 404: Ref("Problem"), 502: Ref("Problem") },
+      },
+    },
+    async (req, reply) => {
+      const { username } = req.params as { username: string };
+      const result = await callEngine(reply, () => app.engine.rotateCredential(username));
+      if (!result.ok) return result.reply;
+
+      audit(app, req, "credential.rotate", username);
+      return result.value;
+    },
+  );
+
   /* ── Audit ───────────────────────────────────────────────────────────── */
 
   app.get(

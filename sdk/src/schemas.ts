@@ -275,6 +275,22 @@ export const ProxyCredentialSchema = Type.Object(
 );
 export type ProxyCredential = Static<typeof ProxyCredentialSchema>;
 
+/** A credential whose session was turned over. */
+export const CredentialRotationSchema = Type.Object(
+  {
+    /** The credential the session belonged to. */
+    username: Type.String(),
+    /** The policy the credential carries. */
+    policy: Type.String(),
+    /** Whether anything was actually held. */
+    rotated: Type.Boolean(),
+    /** The proxy in front now. */
+    current_proxy: Type.Union([Type.String(), Type.Null()]),
+  },
+  { $id: "CredentialRotation" },
+);
+export type CredentialRotation = Static<typeof CredentialRotationSchema>;
+
 /** The local proxy a program can be pointed at. */
 export const LocalProxySchema = Type.Object(
   {
@@ -384,6 +400,7 @@ export const SCHEMAS = {
   ProxyPolicySettings: ProxyPolicySettingsSchema,
   ProxyPolicy: ProxyPolicySchema,
   ProxyCredential: ProxyCredentialSchema,
+  CredentialRotation: CredentialRotationSchema,
   LocalProxy: LocalProxySchema,
   Problem: ProblemSchema,
 } as const;

@@ -1,7 +1,7 @@
 "use client";
 
 import type { LocalProxy, ProxyCredential, ProxyPolicy } from "@proxy-switcher/sdk";
-import { KeyRound, Plus, Trash2 } from "lucide-react";
+import { KeyRound, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
@@ -90,6 +90,20 @@ export function LocalProxyPanel({
       toast.error(error instanceof Error ? error.message : tCommon("error"));
     } finally {
       setPending(false);
+    }
+  }
+
+  async function onRotate(name: string) {
+    try {
+      const rotation = await api.rotateCredential(name);
+      if (rotation.rotated) {
+        toast.success(t("rotated", { name }));
+      } else {
+        toast.message(t("rotateNothing", { name }));
+      }
+      startTransition(() => router.refresh());
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : tCommon("error"));
     }
   }
 
@@ -201,27 +215,37 @@ export function LocalProxyPanel({
                   <TableCell>{new Date(credential.created_at).toLocaleString()}</TableCell>
                   <TableCell>
                     {canWrite ? (
-                      <AlertDialog>
-                        <AlertDialogTrigger asChild>
-                          <Button variant="ghost" size="icon-sm" aria-label={t("remove")}>
-                            <Trash2 className="size-4" />
-                          </Button>
-                        </AlertDialogTrigger>
-                        <AlertDialogContent>
-                          <AlertDialogHeader>
-                            <AlertDialogTitle>{t("removeTitle")}</AlertDialogTitle>
-                            <AlertDialogDescription>
-                              {t("removeDescription", { name: credential.username })}
-                            </AlertDialogDescription>
-                          </AlertDialogHeader>
-                          <AlertDialogFooter>
-                            <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
-                            <AlertDialogAction onClick={() => onDelete(credential.username)}>
-                              {t("remove")}
-                            </AlertDialogAction>
-                          </AlertDialogFooter>
-                        </AlertDialogContent>
-                      </AlertDialog>
+                      <div className="flex items-center justify-end gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label={t("rotate")}
+                          onClick={() => onRotate(credential.username)}
+                        >
+                          <RefreshCw className="size-4" />
+                        </Button>
+                        <AlertDialog>
+                          <AlertDialogTrigger asChild>
+                            <Button variant="ghost" size="icon-sm" aria-label={t("remove")}>
+                              <Trash2 className="size-4" />
+                            </Button>
+                          </AlertDialogTrigger>
+                          <AlertDialogContent>
+                            <AlertDialogHeader>
+                              <AlertDialogTitle>{t("removeTitle")}</AlertDialogTitle>
+                              <AlertDialogDescription>
+                                {t("removeDescription", { name: credential.username })}
+                              </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                              <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
+                              <AlertDialogAction onClick={() => onDelete(credential.username)}>
+                                {t("remove")}
+                              </AlertDialogAction>
+                            </AlertDialogFooter>
+                          </AlertDialogContent>
+                        </AlertDialog>
+                      </div>
                     ) : null}
                   </TableCell>
                 </TableRow>

@@ -84,8 +84,11 @@
     }
   },
   "rotate": {
-    "description": "Move to the next proxy in the pool",
-    "done": "Active proxy: {id}"
+    "description": "Turn a sticky session over",
+    "done": "The session of {name} was turned over.",
+    "name": "name",
+    "proxy": "Proxy in front now",
+    "nothing": "The session of {name} had already run out."
   },
   "sources": {
     "group": "Manage scrape sources",

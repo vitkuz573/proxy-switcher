@@ -223,6 +223,9 @@
     "remove": "Remove",
     "removeTitle": "Remove the credential?",
     "removeDescription": "The credential {name} stops being accepted at once.",
-    "removed": "The credential {name} is gone."
+    "removed": "The credential {name} is gone.",
+    "rotate": "Turn the session over",
+    "rotated": "The session of {name} was turned over.",
+    "rotateNothing": "The session of {name} had already run out."
   }
 }

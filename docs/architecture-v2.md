@@ -322,6 +322,21 @@ keeps is a salted digest. The name in the credential is what tells the
 clients apart — every program on the host connects from the same address —
 so it is also what makes a sticky session possible.
 
+### Turning a session over
+
+A sticky session is pinned to a proxy until its window runs out, or until the
+proxy dies. The operator can also turn it over by hand: the pin is dropped,
+and the proxy the client was turned away from is left out of the next
+choice, so the client is given a different one rather than the same one
+again.
+
+The same goes for a rotation by time: the proxy in front of a policy is
+replaced, and the one it replaces is left out of the next choice.
+
+```bash
+ps credentials rotate work
+```
+
 ### A dead proxy does not stop the traffic
 
 When a connection cannot be carried, the failure is recorded against the

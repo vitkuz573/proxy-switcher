@@ -1,6 +1,7 @@
 import type { Config } from "../config.js";
 import type {
   Anonymity,
+  CredentialRotation,
   LocalProxy,
   PoolStatistics,
   Problem,
@@ -256,6 +257,13 @@ export class EngineClient {
 
   deleteCredential(username: string): Promise<void> {
     return this.request<void>("DELETE", `/api/v1/credentials/${encodeURIComponent(username)}`);
+  }
+
+  rotateCredential(username: string): Promise<CredentialRotation> {
+    return this.request<CredentialRotation>(
+      "POST",
+      `/api/v1/credentials/${encodeURIComponent(username)}/rotate`,
+    );
   }
 }
 
