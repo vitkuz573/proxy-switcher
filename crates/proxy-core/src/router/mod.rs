@@ -358,7 +358,10 @@ impl Router {
                         // The proxy is recorded as failed and stepped aside.
                         router.pool.report_failure(&failed.id).await;
                         avoided.insert(failed.id.clone());
-                        let replacement = router.pool.activate_best_avoiding(&avoided).await;
+                        let replacement = router
+                            .pool
+                            .activate_best_avoiding(&avoided, &std::collections::HashSet::new())
+                            .await;
 
                         match replacement {
                             Some(next) => {

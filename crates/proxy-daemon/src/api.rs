@@ -101,6 +101,20 @@ impl PoolHistory {
         }
     }
 
+    /// Fill the history with what was kept.
+    ///
+    /// The graph is the one thing that says how the pool has moved, and a
+    /// restart used to empty it: the samples lived in memory and were gone
+    /// with the process.
+    pub fn restore(&self, samples: Vec<HistorySample>) {
+        if let Ok(mut kept) = self.samples.lock() {
+            kept.clear();
+            for sample in samples.into_iter().rev().take(self.capacity) {
+                kept.push_front(sample);
+            }
+        }
+    }
+
     /// The samples, oldest first.
     pub fn samples(&self) -> Vec<HistorySample> {
         self.samples
@@ -1071,6 +1085,9 @@ async fn create_scrape_run(State(state): State<AppState>) -> Response {
             s.check_running = true;
             s.check_total = pending;
         }
+
+        // The counter belongs to the batch: the rounds that follow add to it.
+        check_progress.store(0, std::sync::atomic::Ordering::Relaxed);
 
         // The manual trigger probes in rounds too, for the same reason: the
         // pool is the source, and a copy of it is not needed.

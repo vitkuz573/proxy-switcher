@@ -637,6 +637,12 @@ impl LocalProxy {
             return self.pool.active().await.filter(|p| policy.allows(p));
         };
 
+        tracing::debug!(
+            id = %proxy.id,
+            exit = ?proxy.exit_ip,
+            "a proxy of its own for this request"
+        );
+
         self.remember(&proxy).await;
         Some(proxy)
     }
@@ -815,8 +821,43 @@ impl LocalProxy {
         upstream.write_all(&request.raw).await?;
         upstream.flush().await?;
 
+        // The answer comes within a budget. A proxy that takes the request
+        // and says nothing must not hold the client for ever: the client
+        // would wait until its own timeout, and the proxy would look alive
+        // to every check that only looks at the connection.
         let mut response = Vec::new();
-        upstream.read_to_end(&mut response).await?;
+        match tokio::time::timeout(self.config.timeout * 2, upstream.read_to_end(&mut response))
+            .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                self.record_failure(&proxy).await;
+                return self
+                    .refuse(
+                        &mut client,
+                        502,
+                        "Bad Gateway",
+                        &format!("the proxy failed: {e}"),
+                    )
+                    .await;
+            }
+            Err(_) => {
+                warn!(
+                    "the proxy {} said nothing and is called half dead",
+                    proxy.id
+                );
+                self.record_failure(&proxy).await;
+                return self
+                    .refuse(
+                        &mut client,
+                        504,
+                        "Gateway Timeout",
+                        "the proxy took the request and said nothing",
+                    )
+                    .await;
+            }
+        }
+
         client.write_all(&response).await?;
         client.shutdown().await?;
 
@@ -886,18 +927,50 @@ impl LocalProxy {
         let mut last_error: Option<anyhow::Error> = None;
         let mut current = proxy;
 
+        // The addresses that were used lately are left out as well: the
+        // replacement for a proxy that died should carry the traffic to
+        // another address, not to the same one.
+        let (_, avoid_exits) = self.recently_used().await;
+
+        // The whole search has a budget. Five proxies that each take their
+        // own time out would hold the client for longer than it is willing
+        // to wait, and the client would give up before the answer came.
+        let deadline = std::time::Instant::now() + self.config.timeout * 3;
+
         for _ in 0..self.config.max_attempts.max(1) {
+            // What is left of the budget is what this attempt may take.
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+
             let options = ConnectOptions {
                 mark: self.mark,
-                timeout: self.config.timeout,
+                timeout: left.min(self.config.timeout),
                 credentials: None,
             };
 
-            match self
+            // A proxy that refuses a tunnel may still forward plain requests,
+            // and a large part of the public proxy population does exactly
+            // that. The request is not lost over a tunnel the proxy would
+            // not open.
+            let tunnel = self
                 .forwarder
                 .connect_to_with(&current, target, &options)
-                .await
-            {
+                .await;
+
+            let outcome = match tunnel {
+                Ok(stream) => Ok(stream),
+                Err(e) if Carriage::is_plain_http(target.port) => {
+                    match self.connect_plain(&current, &options).await {
+                        Ok(stream) => Ok(stream),
+                        Err(_) => Err(e),
+                    }
+                }
+                Err(e) => Err(e),
+            };
+
+            match outcome {
                 Ok(stream) => return Ok((stream, current.clone())),
                 Err(e) => {
                     warn!(
@@ -921,7 +994,7 @@ impl LocalProxy {
                     // The proxy the device routes through is not touched: the
                     // local proxy has its own rotation, and the two must not
                     // fight over the same selection.
-                    match self.pool.best_avoiding(&avoided).await {
+                    match self.pool.best_avoiding(&avoided, &avoid_exits).await {
                         Some(next) => {
                             self.stats.rotations.fetch_add(1, Ordering::Relaxed);
                             current = next;

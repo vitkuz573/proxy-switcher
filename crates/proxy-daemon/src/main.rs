@@ -433,7 +433,29 @@ async fn main() -> anyhow::Result<()> {
     let scrape_state = Arc::new(RwLock::new(api::ScrapeState::new(check_progress.clone())));
 
     // The pool over time: one sample a minute, a day of history.
+    //
+    // The samples are kept on disk as well: the graph says how the pool has
+    // moved, and a restart used to empty it.
     let history = api::PoolHistory::new(24 * 60);
+    if let Some(path) = db_path.as_ref() {
+        let kept = Storage::open(path)
+            .and_then(|storage| storage.load_setting("pool_history"))
+            .unwrap_or(None);
+
+        if let Some(kept) = kept {
+            match serde_json::from_str::<Vec<proxy_core::pool::statistics::HistorySample>>(&kept) {
+                Ok(samples) if !samples.is_empty() => {
+                    history.restore(samples);
+                    info!(
+                        samples = history.samples().len(),
+                        "the pool history restored"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => warn!("the pool history could not be read: {e}"),
+            }
+        }
+    }
 
     let policy_destinations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let policy_routes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -617,6 +639,11 @@ async fn main() -> anyhow::Result<()> {
                             s.check_running = true;
                             s.check_total = due_total;
                         }
+
+                        // The counter belongs to the batch: the rounds that
+                        // follow add to it, so the progress of the whole
+                        // batch is what is shown.
+                        progress.store(0, std::sync::atomic::Ordering::Relaxed);
 
                         let hc = health_clone.clone();
                         let pc = pool_clone.clone();
@@ -917,6 +944,27 @@ async fn main() -> anyhow::Result<()> {
                     working: statistics.working,
                     due: statistics.due,
                 });
+
+                // The history is written down with it: a restart used to
+                // empty the graph.
+                if let Some(path) = db_path.clone() {
+                    let samples = history.samples();
+                    match serde_json::to_string(&samples) {
+                        Ok(encoded) => {
+                            let written = tokio::task::spawn_blocking(move || {
+                                Storage::open(&path)?.save_setting("pool_history", &encoded)
+                            })
+                            .await;
+
+                            match written {
+                                Ok(Ok(())) => {}
+                                Ok(Err(e)) => warn!("the pool history could not be written: {e}"),
+                                Err(e) => warn!("the write-down task failed: {e}"),
+                            }
+                        }
+                        Err(e) => warn!("the pool history could not be encoded: {e}"),
+                    }
+                }
 
                 // The active proxy is written down when it changes.
                 //

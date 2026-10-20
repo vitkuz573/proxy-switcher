@@ -28,10 +28,19 @@ pub struct HealthChecker {
     concurrency: Arc<Semaphore>,
     /// Probe targets, tried in order.
     ///
-    /// More than one, because the target is a third party: it can be blocked,
-    /// overloaded or simply down. A single unreachable target would otherwise
-    /// mark every proxy in the pool as dead.
+    /// More than one, because the target is a third party: it can be
+    /// overloaded or simply down, and the network a proxy sits on may not see
+    /// the target the engine itself reaches. A single unreachable target
+    /// would otherwise mark every proxy in the pool as dead.
     target_urls: Vec<String>,
+    /// How many targets one proxy may try.
+    ///
+    /// Every target that does not answer costs the proxy a full timeout, and
+    /// the pool is large: a proxy that tried all of them would make the
+    /// batch several times longer than it needs to be, and the pool would be
+    /// confirmed less often than the proxies die. Two is enough to widen the
+    /// working set without holding the round up.
+    max_targets_per_proxy: usize,
     /// Budget for the proxy handshake.
     ///
     /// Kept separate from the exchange budget because they measure different
@@ -568,9 +577,29 @@ impl HealthChecker {
         target_urls: Vec<String>,
         mark: Option<u32>,
     ) -> Self {
+        Self::with_max_targets_per_proxy(
+            concurrency,
+            timeout_secs,
+            connect_timeout_secs,
+            target_urls,
+            mark,
+            2,
+        )
+    }
+
+    /// Build a checker with the number of targets a proxy may try.
+    pub fn with_max_targets_per_proxy(
+        concurrency: usize,
+        timeout_secs: u64,
+        connect_timeout_secs: u64,
+        target_urls: Vec<String>,
+        mark: Option<u32>,
+        max_targets_per_proxy: usize,
+    ) -> Self {
         Self {
             concurrency: Arc::new(Semaphore::new(concurrency)),
             target_urls,
+            max_targets_per_proxy: max_targets_per_proxy.max(1),
             connect_timeout: Duration::from_secs(connect_timeout_secs),
             timeout: Duration::from_secs(timeout_secs),
             mark,
@@ -755,7 +784,7 @@ impl HealthChecker {
     async fn probe_against(&self, proxy: &ProxyInfo, targets: &[ActiveTarget]) -> HealthResult {
         let mut inconclusive: Option<HealthResult> = None;
 
-        for target in targets {
+        for target in targets.iter().take(self.max_targets_per_proxy) {
             let result = check_one(
                 proxy,
                 &target.host,
@@ -803,7 +832,10 @@ impl HealthChecker {
         Fut: std::future::Future<Output = ()>,
     {
         let total = proxies.len();
-        checked.store(0, Ordering::Relaxed);
+
+        // The counter is not reset here: a batch is run in rounds, and the
+        // progress of the whole batch is what the operator watches. The
+        // caller sets the counter to zero when the batch starts.
 
         // A target that the engine cannot reach directly is not a reason to
         // stop. The proxies live on other networks, which are often less
@@ -837,6 +869,7 @@ impl HealthChecker {
             let timeout = self.timeout;
             let connect_timeout = self.connect_timeout;
             let targets = targets.clone();
+            let max_targets = self.max_targets_per_proxy;
             let mark = self.mark;
             let forwarder = self.forwarder.clone();
             let tx = tx.clone();
@@ -851,7 +884,7 @@ impl HealthChecker {
                 // at least one of them.
                 let mut inconclusive: Option<HealthResult> = None;
 
-                for target in &targets {
+                for target in targets.iter().take(max_targets) {
                     let result = check_one(
                         &proxy,
                         &target.host,

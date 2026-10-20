@@ -669,6 +669,7 @@ impl ProxyPool {
     pub async fn best_avoiding(
         &self,
         avoid: &std::collections::HashSet<String>,
+        avoid_exits: &std::collections::HashSet<std::net::IpAddr>,
     ) -> Option<ProxyInfo> {
         let inner = self.inner.read().await;
         let now = chrono::Utc::now();
@@ -679,6 +680,7 @@ impl ProxyPool {
             .filter(|p| {
                 !avoid.contains(&p.id)
                     && !avoid.contains(&format!("host:{}", p.host))
+                    && !p.exit_ip.is_some_and(|exit| avoid_exits.contains(&exit))
                     && p.last_success.is_some()
                     && p.consecutive_failures == 0
                     && p.supports_tunnel
@@ -741,6 +743,7 @@ impl ProxyPool {
     pub async fn activate_best_avoiding(
         &self,
         avoid: &std::collections::HashSet<String>,
+        avoid_exits: &std::collections::HashSet<std::net::IpAddr>,
     ) -> Option<ProxyInfo> {
         let mut inner = self.inner.write().await;
 
@@ -752,6 +755,7 @@ impl ProxyPool {
             .filter(|p| {
                 !avoid.contains(&p.id)
                     && !avoid.contains(&format!("host:{}", p.host))
+                    && !p.exit_ip.is_some_and(|exit| avoid_exits.contains(&exit))
                     && p.last_success.is_some()
                     && p.consecutive_failures == 0
                     && p.supports_tunnel
@@ -914,7 +918,10 @@ mod tests {
             .await;
 
         let next = pool
-            .activate_best_avoiding(&std::collections::HashSet::new())
+            .activate_best_avoiding(
+                &std::collections::HashSet::new(),
+                &std::collections::HashSet::new(),
+            )
             .await
             .expect("a working proxy");
 
@@ -934,7 +941,10 @@ mod tests {
         .await;
 
         let next = pool
-            .best_avoiding(&std::collections::HashSet::new())
+            .best_avoiding(
+                &std::collections::HashSet::new(),
+                &std::collections::HashSet::new(),
+            )
             .await
             .expect("a working proxy");
 
@@ -979,7 +989,7 @@ mod tests {
 
         let avoid: std::collections::HashSet<String> = ["a".to_string()].into_iter().collect();
         let next = pool
-            .activate_best_avoiding(&avoid)
+            .activate_best_avoiding(&avoid, &std::collections::HashSet::new())
             .await
             .expect("a working proxy");
 

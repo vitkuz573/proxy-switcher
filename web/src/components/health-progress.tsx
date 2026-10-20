@@ -87,8 +87,12 @@ export function HealthProgress({ initial }: { initial: ScrapeRun | null }) {
   }
 
   const progress = run.health_check;
+  // The progress is clamped: the pool grows while it is being checked, and a
+  // progress bar that goes past its own end says nothing.
   const percent =
-    progress && progress.total > 0 ? Math.round((progress.checked / progress.total) * 100) : 0;
+    progress && progress.total > 0
+      ? Math.min(100, Math.round((progress.checked / progress.total) * 100))
+      : 0;
 
   return (
     <Card>

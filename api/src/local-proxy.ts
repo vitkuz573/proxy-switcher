@@ -65,7 +65,7 @@ export function serveLocalProxy(app: FastifyInstance, target: LocalProxyTarget):
     const fail = (reason: string) => {
       app.log.warn({ reason }, "the local proxy could not be reached");
       clientSocket.end(
-        "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nThe local proxy is not reachable.\n",
+        "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nThe local proxy did not answer.\n",
       );
     };
 
@@ -116,6 +116,10 @@ export async function forwardProxyRequest(
       // request is going.
       path: req.url,
       headers: req.headers,
+      // No pooling: the local proxy carries one request per connection, and
+      // a socket kept in a pool would be handed the next request after the
+      // other side has already closed it.
+      agent: false,
     });
 
     upstream.on("response", (response) => {
@@ -130,10 +134,7 @@ export async function forwardProxyRequest(
 
     upstream.on("error", () => {
       if (!reply.sent) {
-        reply
-          .code(502)
-          .type("text/plain; charset=utf-8")
-          .send("The local proxy is not reachable.\n");
+        reply.code(502).type("text/plain; charset=utf-8").send("The local proxy did not answer.\n");
       }
       resolve();
     });
