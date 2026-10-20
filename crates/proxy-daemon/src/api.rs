@@ -138,6 +138,10 @@ pub struct AppState {
     pub policy_routes: Arc<std::sync::atomic::AtomicUsize>,
     /// The active proxy the operator chose, kept while the pool catches up.
     pub remembered_active: Arc<tokio::sync::RwLock<Option<String>>>,
+    /// The local proxy a program can be pointed at.
+    pub local_proxy: Arc<proxy_core::local_proxy::LocalProxy>,
+    /// The credentials the local proxy accepts.
+    pub credentials: Option<Arc<proxy_core::credentials::CredentialStore>>,
     /// The firewall mark the daemon's own traffic carries.
     pub bypass_mark: u32,
     /// Whether the default route points at the TUN device.
@@ -265,6 +269,10 @@ impl ApiError {
     fn bad_request(detail: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, detail)
     }
+
+    fn internal(detail: impl Into<String>) -> Self {
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, detail)
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -296,6 +304,16 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/statistics", get(get_statistics))
         .route("/api/v1/stats", get(get_stats))
         .route("/api/v1/dns", get(get_dns))
+        // The local proxy a program can be pointed at, and the credentials
+        // that decide how its traffic is carried.
+        .route("/api/v1/local-proxy", get(get_local_proxy))
+        .route("/api/v1/policies", get(list_policies).post(create_policy))
+        .route("/api/v1/policies/{name}", delete(delete_policy))
+        .route(
+            "/api/v1/credentials",
+            get(list_credentials).post(create_credential),
+        )
+        .route("/api/v1/credentials/{username}", delete(delete_credential))
         // Proxies
         .route("/api/v1/proxies", get(list_proxies).post(create_proxy))
         .route("/api/v1/proxies/{id}", get(get_proxy).delete(delete_proxy))
@@ -516,6 +534,232 @@ async fn delete_proxy(
     } else {
         Err(ApiError::not_found(format!("No proxy with id {id}")))
     }
+}
+
+/* ── Local proxy, policies and credentials ──────────────────────────────── */
+
+/// The local proxy and what it is doing.
+async fn get_local_proxy(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let state = state.local_proxy.state().await;
+    Ok(Json(serde_json::json!({
+        "enabled": state.enabled,
+        "address": state.address,
+        "current_proxy": state.current_proxy,
+        "sessions": state.sessions,
+        "connections": state.connections,
+        "tunnels": state.tunnels,
+        "failures": state.failures,
+        "rotations": state.rotations,
+        "refused": state.refused,
+        "bytes_out": state.bytes_out,
+        "bytes_in": state.bytes_in,
+    })))
+}
+
+/// Every policy.
+async fn list_policies(State(state): State<AppState>) -> Result<Json<Vec<Policy>>, ApiError> {
+    let store = state
+        .credentials
+        .as_ref()
+        .ok_or_else(|| ApiError::conflict("The engine has no database, so it holds no policies"))?;
+
+    let policies = store
+        .list_policies()
+        .await
+        .map_err(|e| ApiError::internal(format!("could not read the policies: {e}")))?;
+
+    Ok(Json(
+        policies
+            .into_iter()
+            .map(|policy| Policy {
+                name: policy.name,
+                settings: policy.settings,
+                builtin: policy.builtin,
+            })
+            .collect(),
+    ))
+}
+
+/// Write a policy down.
+async fn create_policy(
+    State(state): State<AppState>,
+    Json(body): Json<Policy>,
+) -> Result<Json<Policy>, ApiError> {
+    let store = state
+        .credentials
+        .as_ref()
+        .ok_or_else(|| ApiError::conflict("The engine has no database, so it holds no policies"))?;
+
+    if body.name.trim().is_empty() {
+        return Err(ApiError::bad_request("A policy needs a name"));
+    }
+
+    let policy = proxy_core::credentials::ProxyPolicyRecord {
+        name: body.name.trim().to_string(),
+        settings: body.settings,
+        builtin: false,
+    };
+
+    store
+        .save_policy(&policy)
+        .await
+        .map_err(|e| ApiError::internal(format!("could not write the policy: {e}")))?;
+
+    Ok(Json(Policy {
+        name: policy.name,
+        settings: policy.settings,
+        builtin: false,
+    }))
+}
+
+/// Remove a policy.
+async fn delete_policy(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let store = state
+        .credentials
+        .as_ref()
+        .ok_or_else(|| ApiError::conflict("The engine has no database, so it holds no policies"))?;
+
+    match store.delete_policy(&name).await {
+        Ok(true) => Ok(StatusCode::NO_CONTENT),
+        Ok(false) => Err(ApiError::not_found(format!("No policy named {name}"))),
+        Err(e) => Err(ApiError::internal(format!(
+            "could not remove the policy: {e}"
+        ))),
+    }
+}
+
+/// Every credential, without its secret.
+async fn list_credentials(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Credential>>, ApiError> {
+    let store = state.credentials.as_ref().ok_or_else(|| {
+        ApiError::conflict("The engine has no database, so it holds no credentials")
+    })?;
+
+    let credentials = store
+        .list_credentials()
+        .await
+        .map_err(|e| ApiError::internal(format!("could not read the credentials: {e}")))?;
+
+    Ok(Json(
+        credentials
+            .into_iter()
+            .map(|credential| Credential {
+                username: credential.username,
+                policy: credential.policy,
+                enabled: credential.enabled,
+                created_at: credential.created_at,
+                password: None,
+            })
+            .collect(),
+    ))
+}
+
+/// Create a credential.
+///
+/// The password is in the answer and nowhere else: the engine keeps a digest
+/// of it and cannot show it again.
+async fn create_credential(
+    State(state): State<AppState>,
+    Json(body): Json<NewCredential>,
+) -> Result<(StatusCode, Json<Credential>), ApiError> {
+    let store = state.credentials.as_ref().ok_or_else(|| {
+        ApiError::conflict("The engine has no database, so it holds no credentials")
+    })?;
+
+    if body.username.trim().is_empty() {
+        return Err(ApiError::bad_request("A credential needs a name"));
+    }
+
+    if store
+        .policy(&body.policy)
+        .await
+        .map_err(|e| ApiError::internal(format!("could not read the policy: {e}")))?
+        .is_none()
+    {
+        return Err(ApiError::not_found(format!(
+            "No policy named {}",
+            body.policy
+        )));
+    }
+
+    let credential = store
+        .create_credential(body.username.trim(), &body.policy)
+        .await
+        .map_err(|e| ApiError::internal(format!("could not create the credential: {e}")))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(Credential {
+            username: credential.username,
+            policy: credential.policy,
+            enabled: credential.enabled,
+            created_at: credential.created_at,
+            password: credential.password,
+        }),
+    ))
+}
+
+/// Remove a credential.
+async fn delete_credential(
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let store = state.credentials.as_ref().ok_or_else(|| {
+        ApiError::conflict("The engine has no database, so it holds no credentials")
+    })?;
+
+    match store.delete_credential(&username).await {
+        Ok(true) => Ok(StatusCode::NO_CONTENT),
+        Ok(false) => Err(ApiError::not_found(format!(
+            "No credential named {username}"
+        ))),
+        Err(e) => Err(ApiError::internal(format!(
+            "could not remove the credential: {e}"
+        ))),
+    }
+}
+
+/// A policy, as it is written and read.
+#[derive(Serialize, Deserialize)]
+struct Policy {
+    /// The name the credential refers to.
+    name: String,
+    /// What the policy allows.
+    settings: proxy_core::credentials::ProxyPolicy,
+    /// Whether the policy came with the engine.
+    #[serde(default)]
+    builtin: bool,
+}
+
+/// A credential, as it is listed.
+#[derive(Serialize, Deserialize)]
+struct Credential {
+    /// The name the client authenticates with.
+    username: String,
+    /// The policy the credential carries.
+    policy: String,
+    /// Whether the credential is still accepted.
+    enabled: bool,
+    /// When the credential was created.
+    created_at: chrono::DateTime<chrono::Utc>,
+    /// The password, only when it was just created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    password: Option<String>,
+}
+
+/// A request to create a credential.
+#[derive(Deserialize)]
+struct NewCredential {
+    /// The name the client authenticates with.
+    username: String,
+    /// The policy the credential carries.
+    policy: String,
 }
 
 /* ── Active proxy ──────────────────────────────────────────────────────── */

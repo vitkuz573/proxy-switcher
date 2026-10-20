@@ -283,6 +283,57 @@ Moving the default route at the device is a separate, explicit decision
 (`tun.default_route`), because it changes how the whole host reaches the
 internet.
 
+## A local proxy for any program
+
+The engine listens on a port that speaks the HTTP proxy protocol, so a
+program is given one address and never has to know which public proxy is
+carrying its traffic:
+
+```bash
+export HTTPS_PROXY=http://name:password@127.0.0.1:9098
+```
+
+It accepts `CONNECT host:port` for a tunnel and an absolute URI for an
+ordinary request. The API service serves the same port through its own, so
+the address a program is given can be either.
+
+### Credentials carry the policy
+
+A client authenticates with a credential, and the credential carries a
+policy. One operator can hand out a credential that keeps a session on one
+exit address for a login, and another that changes the address on every
+request for a crawler, without either of them touching the engine.
+
+A policy says:
+
+- **how the proxy underneath is chosen** — `sticky` (a client keeps one proxy
+  for its session), `time` (the proxy in front is replaced on a schedule) or
+  `per_request` (every request may be carried by a different proxy);
+- **which countries the exit address may be in**, as ISO 3166-1 alpha-2
+  codes;
+- **which protocols may be used**;
+- **how slow is too slow**, as a score.
+
+The policies are named, and a credential refers to one by name. The built-in
+ones are `default` (sticky), `rotating` (per request) and `timed` (by time).
+
+The password is generated, shown once, and never stored: what the engine
+keeps is a salted digest. The name in the credential is what tells the
+clients apart — every program on the host connects from the same address —
+so it is also what makes a sticky session possible.
+
+### A dead proxy does not stop the traffic
+
+When a connection cannot be carried, the failure is recorded against the
+proxy, the proxy steps aside, and the next one is tried — up to five before
+the client is refused. A server that does not answer does not answer on its
+other ports either, and the pool is full of the same endpoint published under
+many names, so the whole host is left out for the next attempt.
+
+Local addresses are never proxied. A program that points at the port and then
+talks to the console on the same host would otherwise be talking to itself
+through a proxy.
+
 ## Migration order
 
 Each step is independently verifiable and leaves the system running.

@@ -211,6 +211,92 @@ export const RoutingInfoSchema = Type.Object(
 );
 export type RoutingInfo = Static<typeof RoutingInfoSchema>;
 
+/**
+ * How the proxy underneath is chosen.
+ *
+ * - `time` — the proxy in front is replaced on a schedule.
+ * - `per_request` — every request may be carried by a different proxy.
+ * - `sticky` — a client keeps one proxy for as long as its session lasts.
+ */
+export const RotationSchema = Type.Union([
+  Type.Literal("time"),
+  Type.Literal("per_request"),
+  Type.Literal("sticky"),
+]);
+export type Rotation = Static<typeof RotationSchema>;
+
+/** What a credential's traffic is allowed to do. */
+export const ProxyPolicySettingsSchema = Type.Object(
+  {
+    rotation: RotationSchema,
+    /** How long a client keeps its proxy, in seconds. */
+    sticky_secs: Type.Integer(),
+    /** How often the proxy in front is replaced, in seconds. */
+    rotate_interval_secs: Type.Integer(),
+    /** The countries the exit address may be in, as ISO 3166-1 alpha-2 codes. */
+    countries: Type.Array(Type.String()),
+    /** The protocols that may be used. Empty means any. */
+    protocols: Type.Array(ProxyProtocolSchema),
+    /** The score a proxy has to reach to be used. */
+    min_score: Type.Number(),
+  },
+  { $id: "ProxyPolicySettings" },
+);
+export type ProxyPolicySettings = Static<typeof ProxyPolicySettingsSchema>;
+
+/** A named policy. */
+export const ProxyPolicySchema = Type.Object(
+  {
+    name: Type.String(),
+    settings: ProxyPolicySettingsSchema,
+    /** Whether the policy came with the engine. */
+    builtin: Type.Boolean(),
+  },
+  { $id: "ProxyPolicy" },
+);
+export type ProxyPolicy = Static<typeof ProxyPolicySchema>;
+
+/** A credential for the local proxy. */
+export const ProxyCredentialSchema = Type.Object(
+  {
+    username: Type.String(),
+    /** The policy the credential carries. */
+    policy: Type.String(),
+    enabled: Type.Boolean(),
+    created_at: Type.String(),
+    /**
+     * The password, only in the answer that creates the credential.
+     *
+     * The engine keeps a digest of it and cannot show it again.
+     */
+    password: Type.Optional(Type.String()),
+  },
+  { $id: "ProxyCredential" },
+);
+export type ProxyCredential = Static<typeof ProxyCredentialSchema>;
+
+/** The local proxy a program can be pointed at. */
+export const LocalProxySchema = Type.Object(
+  {
+    enabled: Type.Boolean(),
+    /** The address a program should be given. */
+    address: Type.String(),
+    /** The proxy in front right now. */
+    current_proxy: Type.Union([Type.String(), Type.Null()]),
+    /** The clients that hold a proxy of their own. */
+    sessions: Type.Integer(),
+    connections: Type.Integer(),
+    tunnels: Type.Integer(),
+    failures: Type.Integer(),
+    rotations: Type.Integer(),
+    refused: Type.Integer(),
+    bytes_out: Type.Integer(),
+    bytes_in: Type.Integer(),
+  },
+  { $id: "LocalProxy" },
+);
+export type LocalProxy = Static<typeof LocalProxySchema>;
+
 /** How many proxies there are, and how many of them work. */
 export const PoolStatisticsSchema = Type.Object(
   {
@@ -295,6 +381,10 @@ export const SCHEMAS = {
   PoolStatistics: PoolStatisticsSchema,
   RoutingPolicy: RoutingPolicySchema,
   RoutingInfo: RoutingInfoSchema,
+  ProxyPolicySettings: ProxyPolicySettingsSchema,
+  ProxyPolicy: ProxyPolicySchema,
+  ProxyCredential: ProxyCredentialSchema,
+  LocalProxy: LocalProxySchema,
   Problem: ProblemSchema,
 } as const;
 

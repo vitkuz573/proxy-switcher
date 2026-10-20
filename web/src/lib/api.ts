@@ -2,7 +2,10 @@ import "server-only";
 import {
   type AuditEvent,
   createProxySwitcherClient,
+  type LocalProxy,
   type PoolStatistics,
+  type ProxyCredential,
+  type ProxyPolicy,
   type ProxyRecord,
   type RoutingInfo,
   type ScrapeRun,
@@ -56,6 +59,18 @@ export async function getRouting(): Promise<RoutingInfo | null> {
 
 export async function getStats(): Promise<Stats | null> {
   return read(() => serverClient().then((api) => api.getStats()), null);
+}
+
+export async function getLocalProxy(): Promise<LocalProxy | null> {
+  return read(() => serverClient().then((api) => api.getLocalProxy()), null);
+}
+
+export async function getPolicies(): Promise<ProxyPolicy[]> {
+  return read(() => serverClient().then((api) => api.listPolicies()), []);
+}
+
+export async function getCredentials(): Promise<ProxyCredential[]> {
+  return read(() => serverClient().then((api) => api.listCredentials()), []);
 }
 
 export async function getProxies(limit = 100): Promise<ProxyRecord[]> {

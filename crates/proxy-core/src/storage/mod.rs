@@ -37,6 +37,19 @@ impl Storage {
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS proxy_policies (
+                name TEXT PRIMARY KEY,
+                settings TEXT NOT NULL,
+                builtin INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS proxy_credentials (
+                username TEXT PRIMARY KEY,
+                salt TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                policy TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );",
         )?;
 
@@ -71,6 +84,152 @@ impl Storage {
             }
         }
         Ok(())
+    }
+
+    /* ── Policies and credentials ────────────────────────────────────────── */
+
+    /// Write a policy down.
+    pub fn save_policy(&self, policy: &crate::credentials::ProxyPolicyRecord) -> Result<()> {
+        let settings = serde_json::to_string(&policy.settings)?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO proxy_policies (name, settings, builtin) VALUES (?1, ?2, ?3)",
+            rusqlite::params![policy.name, settings, policy.builtin as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Every policy.
+    pub fn list_policies(&self) -> Result<Vec<crate::credentials::ProxyPolicyRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT name, settings, builtin FROM proxy_policies ORDER BY name")?;
+        let mut rows = stmt.query([])?;
+
+        let mut policies = Vec::new();
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(0)?;
+            let settings: String = row.get(1)?;
+            let builtin: i64 = row.get(2)?;
+            policies.push(crate::credentials::ProxyPolicyRecord {
+                name,
+                settings: serde_json::from_str(&settings)?,
+                builtin: builtin != 0,
+            });
+        }
+        Ok(policies)
+    }
+
+    /// One policy by name.
+    pub fn policy(&self, name: &str) -> Result<Option<crate::credentials::ProxyPolicyRecord>> {
+        Ok(self
+            .list_policies()?
+            .into_iter()
+            .find(|policy| policy.name == name))
+    }
+
+    /// Remove a policy.
+    ///
+    /// A built-in policy stays: it is the one a credential falls back to, and
+    /// the engine is expected to have it.
+    pub fn delete_policy(&self, name: &str) -> Result<bool> {
+        if let Some(policy) = self.policy(name)? {
+            if policy.builtin {
+                anyhow::bail!("the policy {name} is built in and cannot be removed");
+            }
+        }
+        let removed = self.conn.execute(
+            "DELETE FROM proxy_policies WHERE name = ?1 AND builtin = 0",
+            rusqlite::params![name],
+        )?;
+        Ok(removed > 0)
+    }
+
+    /// Every credential, without its secret.
+    pub fn list_credentials(&self) -> Result<Vec<crate::credentials::ProxyCredential>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT username, policy, enabled, created_at FROM proxy_credentials ORDER BY username",
+        )?;
+        let mut rows = stmt.query([])?;
+
+        let mut credentials = Vec::new();
+        while let Some(row) = rows.next()? {
+            credentials.push(crate::credentials::ProxyCredential {
+                username: row.get(0)?,
+                policy: row.get(1)?,
+                enabled: row.get::<_, i64>(2)? != 0,
+                created_at: parse_time(row.get::<_, Option<String>>(3)?)
+                    .unwrap_or_else(chrono::Utc::now),
+                password: None,
+            });
+        }
+        Ok(credentials)
+    }
+
+    /// Write a credential down.
+    pub fn save_credential(
+        &self,
+        credential: &crate::credentials::ProxyCredential,
+        salt: &str,
+        password_hash: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO proxy_credentials
+             (username, salt, password_hash, policy, enabled, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                credential.username,
+                salt,
+                password_hash,
+                credential.policy,
+                credential.enabled as i64,
+                credential.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a credential.
+    pub fn delete_credential(&self, username: &str) -> Result<bool> {
+        let removed = self.conn.execute(
+            "DELETE FROM proxy_credentials WHERE username = ?1",
+            rusqlite::params![username],
+        )?;
+        Ok(removed > 0)
+    }
+
+    /// The policy a credential carries, when the password is right.
+    ///
+    /// The check is the only thing standing between the local proxy and an
+    /// open door, so it is done here, in one place, and the answer says
+    /// nothing about which part was wrong.
+    pub fn verify_credential(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<Option<crate::credentials::ProxyPolicyRecord>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT salt, password_hash, policy, enabled FROM proxy_credentials WHERE username = ?1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![username])?;
+
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+
+        let salt: String = row.get(0)?;
+        let stored: String = row.get(1)?;
+        let policy: String = row.get(2)?;
+        let enabled: i64 = row.get(3)?;
+
+        if enabled == 0 {
+            return Ok(None);
+        }
+
+        if !crate::credentials::verify(&salt, password, &stored) {
+            return Ok(None);
+        }
+
+        self.policy(&policy)
     }
 
     /// Remember a setting.
@@ -394,5 +553,63 @@ mod tests {
         Storage::open(&path).expect("first open");
         let storage = Storage::open(&path).expect("second open");
         assert!(storage.load_proxies().expect("load").is_empty());
+    }
+
+    #[test]
+    fn a_credential_is_written_down_and_checked() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("pool.db");
+        let storage = Storage::open(&path).expect("the storage opens");
+
+        let policy = crate::credentials::ProxyPolicyRecord {
+            name: "germany".to_string(),
+            settings: crate::credentials::ProxyPolicy {
+                rotation: crate::credentials::Rotation::Sticky,
+                countries: vec!["DE".to_string()],
+                ..Default::default()
+            },
+            builtin: false,
+        };
+        storage
+            .save_policy(&policy)
+            .expect("the policy is written down");
+
+        let credential = crate::credentials::ProxyCredential {
+            username: "client".to_string(),
+            policy: "germany".to_string(),
+            enabled: true,
+            created_at: chrono::Utc::now(),
+            password: None,
+        };
+        let salt = crate::credentials::generate_salt();
+        let password = crate::credentials::generate_password();
+        let hash = crate::credentials::digest(&salt, &password);
+        storage
+            .save_credential(&credential, &salt, &hash)
+            .expect("the credential is written down");
+
+        // The password is not stored: what is checked is the digest.
+        let checked = storage
+            .verify_credential("client", &password)
+            .expect("the check runs")
+            .expect("the credential is accepted");
+        assert_eq!(checked.name, "germany");
+        assert_eq!(checked.settings.countries, vec!["DE".to_string()]);
+
+        // The wrong password is refused, and it says nothing about which part
+        // was wrong.
+        assert!(storage
+            .verify_credential("client", "another")
+            .expect("the check runs")
+            .is_none());
+        assert!(storage
+            .verify_credential("nobody", &password)
+            .expect("the check runs")
+            .is_none());
+
+        // The list never carries the secret.
+        let listed = storage.list_credentials().expect("the list runs");
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].password.is_none());
     }
 }

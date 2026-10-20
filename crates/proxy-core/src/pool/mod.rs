@@ -661,6 +661,89 @@ impl ProxyPool {
             );
     }
 
+    /// The best working proxy that is not in the given set.
+    ///
+    /// The selection is made without touching the active proxy: a caller that
+    /// hands proxies out to its own clients has its own rotation, and the
+    /// proxy the device routes through is a separate decision.
+    pub async fn best_avoiding(
+        &self,
+        avoid: &std::collections::HashSet<String>,
+    ) -> Option<ProxyInfo> {
+        let inner = self.inner.read().await;
+        let now = chrono::Utc::now();
+
+        inner
+            .proxies
+            .iter()
+            .filter(|p| {
+                !avoid.contains(&p.id)
+                    && !avoid.contains(&format!("host:{}", p.host))
+                    && p.last_success.is_some()
+                    && p.consecutive_failures == 0
+                    && p.supports_tunnel
+                    && p.score >= self.min_score
+            })
+            .max_by(|a, b| {
+                effective_score(a, now)
+                    .partial_cmp(&effective_score(b, now))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .cloned()
+    }
+
+    /// The best working proxy that the policy allows.
+    ///
+    /// The policy decides which countries the exit address may be in and
+    /// which protocols may be used, so the pool does not hand out a proxy the
+    /// policy would refuse.
+    pub async fn best_matching(
+        &self,
+        avoid: &std::collections::HashSet<String>,
+        policy: &crate::credentials::ProxyPolicy,
+    ) -> Option<ProxyInfo> {
+        let inner = self.inner.read().await;
+        let now = chrono::Utc::now();
+
+        {
+            let mut top: Vec<(f64, String)> = inner
+                .proxies
+                .iter()
+                .filter(|p| p.last_success.is_some() && p.consecutive_failures == 0)
+                .map(|p| (effective_score(p, now), p.id.clone()))
+                .collect();
+            top.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            top.truncate(3);
+            tracing::debug!(?top, "the pool's best candidates");
+        }
+
+        inner
+            .proxies
+            .iter()
+            .filter(|p| {
+                !avoid.contains(&p.id)
+                    && !avoid.contains(&format!("host:{}", p.host))
+                    && p.last_success.is_some()
+                    && p.consecutive_failures == 0
+                    && p.supports_tunnel
+                    && p.score >= self.min_score
+                    && policy.allows(p)
+            })
+            .max_by(|a, b| {
+                effective_score(a, now)
+                    .partial_cmp(&effective_score(b, now))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .cloned()
+    }
+
+    /// The proxy with this id, if the pool still has it.
+    pub async fn get(&self, id: &str) -> Option<ProxyInfo> {
+        let inner = self.inner.read().await;
+        let index = *inner.index.get(id)?;
+        inner.proxies.get(index).cloned()
+    }
+
     /// Make the best working proxy the active one.
     ///
     /// The proxies that just failed are left out: a proxy that could not
@@ -678,6 +761,7 @@ impl ProxyPool {
             .iter()
             .filter(|p| {
                 !avoid.contains(&p.id)
+                    && !avoid.contains(&format!("host:{}", p.host))
                     && p.last_success.is_some()
                     && p.consecutive_failures == 0
                     && p.supports_tunnel
@@ -840,6 +924,26 @@ mod tests {
 
         let next = pool
             .activate_best_avoiding(&std::collections::HashSet::new())
+            .await
+            .expect("a working proxy");
+
+        assert_eq!(next.id, "fresh");
+    }
+
+    #[tokio::test]
+    async fn a_fresh_proxy_outranks_a_stale_one_with_a_better_score() {
+        // The stale proxy had the better score when it was measured. It is
+        // four hours old, and a public proxy that was fast then is very
+        // likely dead now.
+        let pool = ProxyPool::new();
+        pool.restore(vec![
+            working("stale", 3.0, 4 * 3600),
+            working("fresh", 0.5, 60),
+        ])
+        .await;
+
+        let next = pool
+            .best_avoiding(&std::collections::HashSet::new())
             .await
             .expect("a working proxy");
 

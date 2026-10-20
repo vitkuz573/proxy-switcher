@@ -16,6 +16,16 @@ const schema = z.object({
   ENGINE_URL: z.url().default("http://127.0.0.1:9099"),
   ENGINE_TIMEOUT_MS: z.coerce.number().int().min(100).default(15_000),
 
+  /**
+   * The engine's local proxy, reached through this service's port.
+   *
+   * A program is given the API's address and uses it as a proxy; the bytes
+   * are carried by the engine, which knows the pool and the policy of the
+   * client's credential.
+   */
+  LOCAL_PROXY_HOST: z.string().default("127.0.0.1"),
+  LOCAL_PROXY_PORT: z.coerce.number().int().min(1).max(65535).default(9098),
+
   /** Auth database. Separate from the engine's own proxy store. */
   DATABASE_PATH: z.string().default("/var/lib/proxy-switcher/auth.db"),
 

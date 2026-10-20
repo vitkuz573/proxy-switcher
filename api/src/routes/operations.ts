@@ -2,7 +2,12 @@ import { Type } from "@sinclair/typebox";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { EngineError } from "../engine/client.js";
 import { describeEngineError, PROBLEM_CONTENT_TYPE } from "../plugins/errors.js";
-import { AnonymitySchema, ProxyProtocolSchema, Ref } from "../schemas/index.js";
+import {
+  AnonymitySchema,
+  ProxyPolicySettingsSchema,
+  ProxyProtocolSchema,
+  Ref,
+} from "../schemas/index.js";
 import { recordAudit } from "../services/auth.js";
 
 /** Default and ceiling for collection size. The pool reaches tens of thousands. */
@@ -437,6 +442,149 @@ export async function operationRoutes(app: FastifyInstance): Promise<void> {
     async (_req, reply) => {
       const result = await callEngine(reply, () => app.engine.getStats());
       return result.ok ? result.value : result.reply;
+    },
+  );
+
+  /* ── The local proxy, its policies and its credentials ───────────────── */
+
+  app.get(
+    "/api/v1/local-proxy",
+    {
+      preHandler: [app.authenticate, app.requireRole("viewer")],
+      schema: {
+        tags: ["local-proxy"],
+        summary: "The local proxy a program can be pointed at",
+        response: { 200: Ref("LocalProxy"), 502: Ref("Problem") },
+      },
+    },
+    async (_req, reply) => {
+      const result = await callEngine(reply, () => app.engine.getLocalProxy());
+      return result.ok ? result.value : result.reply;
+    },
+  );
+
+  app.get(
+    "/api/v1/policies",
+    {
+      preHandler: [app.authenticate, app.requireRole("viewer")],
+      schema: {
+        tags: ["local-proxy"],
+        summary: "The policies a credential may carry",
+        response: { 200: { type: "array", items: Ref("ProxyPolicy") }, 502: Ref("Problem") },
+      },
+    },
+    async (_req, reply) => {
+      const result = await callEngine(reply, () => app.engine.listPolicies());
+      return result.ok ? result.value : result.reply;
+    },
+  );
+
+  app.post(
+    "/api/v1/policies",
+    {
+      preHandler: [app.authenticate, app.requireRole("operator")],
+      schema: {
+        tags: ["local-proxy"],
+        summary: "Write a policy down",
+        body: Type.Object({
+          name: Type.String({ minLength: 1, maxLength: 64 }),
+          settings: ProxyPolicySettingsSchema,
+        }),
+        response: { 201: Ref("ProxyPolicy"), 400: Ref("Problem"), 502: Ref("Problem") },
+      },
+    },
+    async (req, reply) => {
+      const body = req.body as { name: string; settings: never };
+      const result = await callEngine(reply, () => app.engine.createPolicy(body));
+      if (!result.ok) return result.reply;
+
+      audit(app, req, "policy.create", body.name);
+      return reply.code(201).send(result.value);
+    },
+  );
+
+  app.delete(
+    "/api/v1/policies/:name",
+    {
+      preHandler: [app.authenticate, app.requireRole("operator")],
+      schema: {
+        tags: ["local-proxy"],
+        summary: "Remove a policy",
+        params: Type.Object({ name: Type.String() }),
+        response: { 204: { type: "null" }, 404: Ref("Problem"), 502: Ref("Problem") },
+      },
+    },
+    async (req, reply) => {
+      const { name } = req.params as { name: string };
+      const result = await callEngine(reply, () => app.engine.deletePolicy(name));
+      if (!result.ok) return result.reply;
+
+      audit(app, req, "policy.delete", name);
+      return reply.code(204).send();
+    },
+  );
+
+  app.get(
+    "/api/v1/credentials",
+    {
+      preHandler: [app.authenticate, app.requireRole("viewer")],
+      schema: {
+        tags: ["local-proxy"],
+        summary: "The credentials the local proxy accepts",
+        response: {
+          200: { type: "array", items: Ref("ProxyCredential") },
+          502: Ref("Problem"),
+        },
+      },
+    },
+    async (_req, reply) => {
+      const result = await callEngine(reply, () => app.engine.listCredentials());
+      return result.ok ? result.value : result.reply;
+    },
+  );
+
+  app.post(
+    "/api/v1/credentials",
+    {
+      preHandler: [app.authenticate, app.requireRole("operator")],
+      schema: {
+        tags: ["local-proxy"],
+        summary: "Create a credential, and return its password once",
+        body: Type.Object({
+          username: Type.String({ minLength: 1, maxLength: 64 }),
+          policy: Type.String({ minLength: 1, maxLength: 64 }),
+        }),
+        response: { 201: Ref("ProxyCredential"), 400: Ref("Problem"), 502: Ref("Problem") },
+      },
+    },
+    async (req, reply) => {
+      const body = req.body as { username: string; policy: string };
+      const result = await callEngine(reply, () => app.engine.createCredential(body));
+      if (!result.ok) return result.reply;
+
+      audit(app, req, "credential.create", body.username);
+      return reply.code(201).send(result.value);
+    },
+  );
+
+  app.delete(
+    "/api/v1/credentials/:username",
+    {
+      preHandler: [app.authenticate, app.requireRole("operator")],
+      schema: {
+        tags: ["local-proxy"],
+        summary: "Remove a credential",
+        params: Type.Object({ username: Type.String() }),
+        response: { 204: { type: "null" }, 404: Ref("Problem"), 502: Ref("Problem") },
+      },
+    },
+    async (req, reply) => {
+      const { username } = req.params as { username: string };
+      const result = await callEngine(reply, () => app.engine.deleteCredential(username));
+      if (!result.ok) return result.reply;
+
+      audit(app, req, "credential.delete", username);
+      return reply.code(204).send();
     },
   );
 

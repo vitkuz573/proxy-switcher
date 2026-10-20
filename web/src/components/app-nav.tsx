@@ -1,6 +1,6 @@
 "use client";
 
-import { BarChart3, Database, Globe, LayoutDashboard, ScrollText } from "lucide-react";
+import { BarChart3, Database, Globe, LayoutDashboard, Network, ScrollText } from "lucide-react";
 import { useTranslations } from "next-intl";
 import {
   SidebarGroup,
@@ -15,6 +15,7 @@ import { Link, usePathname } from "@/i18n/navigation";
 const NAV = [
   { title: "dashboard", href: "/dashboard", icon: LayoutDashboard },
   { title: "proxies", href: "/proxies", icon: Globe },
+  { title: "proxy", href: "/proxy", icon: Network },
   { title: "scraper", href: "/scraper", icon: Database },
   { title: "statistics", href: "/statistics", icon: BarChart3 },
   { title: "audit", href: "/audit", icon: ScrollText },

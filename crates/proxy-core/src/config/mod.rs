@@ -13,6 +13,69 @@ pub struct Config {
     /// Which traffic a proxy applies to.
     #[serde(default)]
     pub routing: RoutePolicy,
+    /// The local proxy a program can be pointed at.
+    #[serde(default)]
+    pub local_proxy: LocalProxyConfig,
+}
+
+/// The local proxy: a port that speaks the HTTP proxy protocol and carries
+/// the traffic through the pool.
+///
+/// It is off by default. A port that proxies whatever is asked of it is an
+/// open door, and the operator is the one who decides to open it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalProxyConfig {
+    /// Whether the listener runs.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The address it listens on.
+    #[serde(default = "default_local_proxy_host")]
+    pub host: String,
+    /// The port it listens on.
+    #[serde(default = "default_local_proxy_port")]
+    pub port: u16,
+    /// Whether a client without a credential is let in.
+    ///
+    /// The credential is what carries the policy, so without one there is
+    /// nothing that says how the traffic should be carried. Off by default:
+    /// a proxy that lets anyone in is an open door.
+    #[serde(default)]
+    pub allow_anonymous: bool,
+    /// How many proxies are tried before the client is refused.
+    #[serde(default = "default_local_proxy_attempts")]
+    pub max_attempts: usize,
+    /// The budget for opening one tunnel, in seconds.
+    #[serde(default = "default_local_proxy_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_local_proxy_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_local_proxy_port() -> u16 {
+    9098
+}
+
+fn default_local_proxy_attempts() -> usize {
+    5
+}
+
+fn default_local_proxy_timeout() -> u64 {
+    10
+}
+
+impl Default for LocalProxyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: default_local_proxy_host(),
+            port: default_local_proxy_port(),
+            allow_anonymous: false,
+            max_attempts: default_local_proxy_attempts(),
+            timeout_secs: default_local_proxy_timeout(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,6 +298,7 @@ impl Default for Config {
             },
             routing: RoutePolicy::default(),
             geo: GeoConfig::default(),
+            local_proxy: LocalProxyConfig::default(),
             pool: PoolConfig {
                 max_proxies: 1000,
                 min_score: 0.0,

@@ -1,8 +1,10 @@
 pub mod config;
+pub mod credentials;
 pub mod dns;
 pub mod forwarder;
 pub mod geo;
 pub mod health;
+pub mod local_proxy;
 pub mod net;
 pub mod packet;
 pub mod pool;

@@ -2,8 +2,12 @@ import type {
   ApiToken,
   AuditEvent,
   CreatedApiToken,
+  LocalProxy,
   PoolStatistics,
   Problem,
+  ProxyCredential,
+  ProxyPolicy,
+  ProxyPolicySettings,
   ProxyProtocol,
   ProxyRecord,
   RoutingInfo,
@@ -293,6 +297,48 @@ export class ProxySwitcherClient {
     return this.request("GET", "/api/v1/audit-events", {
       query: { limit: 100, offset: 0, ...page },
     });
+  }
+
+  /* ── The local proxy, its policies and its credentials ──────────────── */
+
+  /** The local proxy a program can be pointed at. */
+  getLocalProxy(): Promise<LocalProxy> {
+    return this.request("GET", "/api/v1/local-proxy");
+  }
+
+  /** Every policy the credentials may carry. */
+  listPolicies(): Promise<ProxyPolicy[]> {
+    return this.request("GET", "/api/v1/policies");
+  }
+
+  /** Write a policy down. */
+  createPolicy(policy: { name: string; settings: ProxyPolicySettings }): Promise<ProxyPolicy> {
+    return this.request("POST", "/api/v1/policies", { body: policy });
+  }
+
+  /** Remove a policy. */
+  deletePolicy(name: string): Promise<void> {
+    return this.request("DELETE", `/api/v1/policies/${encodeURIComponent(name)}`);
+  }
+
+  /** Every credential, without its secret. */
+  listCredentials(): Promise<ProxyCredential[]> {
+    return this.request("GET", "/api/v1/credentials");
+  }
+
+  /**
+   * Create a credential.
+   *
+   * The answer carries the password. It is shown once and never again: the
+   * engine keeps a digest of it.
+   */
+  createCredential(credential: { username: string; policy: string }): Promise<ProxyCredential> {
+    return this.request("POST", "/api/v1/credentials", { body: credential });
+  }
+
+  /** Remove a credential. */
+  deleteCredential(username: string): Promise<void> {
+    return this.request("DELETE", `/api/v1/credentials/${encodeURIComponent(username)}`);
   }
 }
 

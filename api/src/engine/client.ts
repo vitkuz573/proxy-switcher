@@ -1,8 +1,12 @@
 import type { Config } from "../config.js";
 import type {
   Anonymity,
+  LocalProxy,
   PoolStatistics,
   Problem,
+  ProxyCredential,
+  ProxyPolicy,
+  ProxyPolicySettings,
   ProxyProtocol,
   ProxyRecord,
   RoutingInfo,
@@ -222,6 +226,36 @@ export class EngineClient {
 
   getDns(): Promise<Array<{ ip: string; hostname: string }>> {
     return this.request<Array<{ ip: string; hostname: string }>>("GET", "/api/v1/dns");
+  }
+
+  /* ── The local proxy, its policies and its credentials ──────────────── */
+
+  getLocalProxy(): Promise<LocalProxy> {
+    return this.request<LocalProxy>("GET", "/api/v1/local-proxy");
+  }
+
+  listPolicies(): Promise<ProxyPolicy[]> {
+    return this.request<ProxyPolicy[]>("GET", "/api/v1/policies");
+  }
+
+  createPolicy(policy: { name: string; settings: ProxyPolicySettings }): Promise<ProxyPolicy> {
+    return this.request<ProxyPolicy>("POST", "/api/v1/policies", policy);
+  }
+
+  deletePolicy(name: string): Promise<void> {
+    return this.request<void>("DELETE", `/api/v1/policies/${encodeURIComponent(name)}`);
+  }
+
+  listCredentials(): Promise<ProxyCredential[]> {
+    return this.request<ProxyCredential[]>("GET", "/api/v1/credentials");
+  }
+
+  createCredential(credential: { username: string; policy: string }): Promise<ProxyCredential> {
+    return this.request<ProxyCredential>("POST", "/api/v1/credentials", credential);
+  }
+
+  deleteCredential(username: string): Promise<void> {
+    return this.request<void>("DELETE", `/api/v1/credentials/${encodeURIComponent(username)}`);
   }
 }
 

@@ -12,6 +12,7 @@ import Fastify, {
 } from "fastify";
 import type { Config } from "./config.js";
 import { EngineClient, isEngineHealthy } from "./engine/client.js";
+import { forwardProxyRequest, isProxyRequest, serveLocalProxy } from "./local-proxy.js";
 import { authPlugin } from "./plugins/auth.js";
 import { enginePlugin } from "./plugins/engine.js";
 import { PROBLEM_CONTENT_TYPE, problem } from "./plugins/errors.js";
@@ -167,10 +168,26 @@ export async function buildApp({
   });
 
   app.setNotFoundHandler(async (req, reply) => {
+    // A request with an absolute URI is a request to a forward proxy. The
+    // API's own port serves the local proxy as well, so a program is given
+    // one address for everything.
+    if (isProxyRequest(req.url)) {
+      return forwardProxyRequest(req, reply, {
+        host: config.LOCAL_PROXY_HOST,
+        port: config.LOCAL_PROXY_PORT,
+      });
+    }
+
     return reply
       .code(404)
       .type(PROBLEM_CONTENT_TYPE)
       .send(problem(404, `No route for ${req.method} ${req.url}`, { instance: req.url }));
+  });
+
+  // The tunnels the local proxy carries.
+  serveLocalProxy(app, {
+    host: config.LOCAL_PROXY_HOST,
+    port: config.LOCAL_PROXY_PORT,
   });
 
   // Kubernetes-style names: /healthz is liveness, /readyz is readiness.

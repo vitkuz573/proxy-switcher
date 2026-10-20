@@ -446,6 +446,196 @@ sources
     });
   });
 
+/* ── The local proxy, its policies and its credentials ─────────────────── */
+
+const proxy = program.command("proxy").description(t("proxy.group"));
+
+proxy
+  .command("status", { isDefault: true })
+  .description(t("proxy.status.description"))
+  .action(async () => {
+    await runCli(async () => {
+      const state = await cliCall(() => client().getLocalProxy());
+
+      if (emit(state)) {
+        return;
+      }
+
+      panel(t("proxy.status.title"), [
+        [
+          t("proxy.status.address"),
+          state.enabled ? ok(state.address) : muted(t("proxy.status.off")),
+        ],
+        [t("proxy.status.current"), state.current_proxy ? state.current_proxy : muted("—")],
+        [t("proxy.status.connections"), String(state.connections)],
+        [t("proxy.status.tunnels"), String(state.tunnels)],
+        [t("proxy.status.sessions"), String(state.sessions)],
+        [t("proxy.status.rotations"), String(state.rotations)],
+        [t("proxy.status.failures"), String(state.failures)],
+        [t("proxy.status.refused"), String(state.refused)],
+        [
+          t("proxy.status.traffic"),
+          `${formatBytes(state.bytes_out)} / ${formatBytes(state.bytes_in)}`,
+        ],
+      ]);
+
+      console.log();
+      console.log(
+        `  ${muted(t("proxy.status.hint"))}  ${bold(
+          `http://name:password@${state.address.replace("http://", "")}`,
+        )}`,
+      );
+      console.log();
+    });
+  });
+
+const policies = program.command("policies").description(t("policies.group"));
+
+policies
+  .command("list", { isDefault: true })
+  .description(t("policies.list.description"))
+  .action(async () => {
+    await runCli(async () => {
+      const list = await cliCall(() => client().listPolicies());
+
+      if (emit(list)) {
+        return;
+      }
+
+      console.log(`\n  ${bold(t("policies.list.title", { count: list.length }))}`);
+      table(
+        [
+          { header: t("policies.list.name"), max: 24 },
+          { header: t("policies.list.rotation"), max: 14 },
+          { header: t("policies.list.countries"), max: 30 },
+        ],
+        list.map((p) => [
+          p.builtin ? `${p.name} ${dim("*")}` : p.name,
+          p.settings.rotation,
+          p.settings.countries.join(", ") || "—",
+        ]),
+      );
+      console.log();
+    });
+  });
+
+policies
+  .command("create")
+  .description(t("policies.create.description"))
+  .argument("<name>", t("policies.create.name"))
+  .option("-r, --rotation <mode>", t("policies.create.rotation"), "sticky")
+  .option("-c, --countries <codes>", t("policies.create.countries"))
+  .option("-s, --sticky-secs <seconds>", t("policies.create.sticky"))
+  .option("-i, --interval-secs <seconds>", t("policies.create.interval"))
+  .action(
+    async (
+      name: string,
+      options: {
+        rotation: "sticky" | "per_request" | "time";
+        countries?: string;
+        stickySecs?: string;
+        intervalSecs?: string;
+      },
+    ) => {
+      await runCli(async () => {
+        const policy = await cliCall(() =>
+          client().createPolicy({
+            name,
+            settings: {
+              rotation: options.rotation,
+              sticky_secs: Number(options.stickySecs ?? 600),
+              rotate_interval_secs: Number(options.intervalSecs ?? 300),
+              countries: (options.countries ?? "")
+                .split(",")
+                .map((code) => code.trim().toUpperCase())
+                .filter(Boolean),
+              protocols: [],
+              min_score: 0,
+            },
+          }),
+        );
+
+        console.log(`  ${ok("✓")} ${t("policies.create.done", { name: policy.name })}`);
+      });
+    },
+  );
+
+policies
+  .command("remove")
+  .description(t("policies.remove.description"))
+  .argument("<name>", t("policies.remove.name"))
+  .action(async (name: string) => {
+    await runCli(async () => {
+      await cliCall(() => client().deletePolicy(name));
+      console.log(`  ${ok("✓")} ${t("policies.remove.done", { name })}`);
+    });
+  });
+
+const credentials = program.command("credentials").description(t("credentials.group"));
+
+credentials
+  .command("list", { isDefault: true })
+  .description(t("credentials.list.description"))
+  .action(async () => {
+    await runCli(async () => {
+      const list = await cliCall(() => client().listCredentials());
+
+      if (emit(list)) {
+        return;
+      }
+
+      console.log(`\n  ${bold(t("credentials.list.title", { count: list.length }))}`);
+      table(
+        [
+          { header: t("credentials.list.name"), max: 24 },
+          { header: t("credentials.list.policy"), max: 24 },
+          { header: t("credentials.list.created"), max: 24 },
+        ],
+        list.map((c) => [c.username, c.policy, c.created_at.slice(0, 19).replace("T", " ")]),
+      );
+      console.log();
+    });
+  });
+
+credentials
+  .command("create")
+  .description(t("credentials.create.description"))
+  .argument("<name>", t("credentials.create.name"))
+  .option("-p, --policy <name>", t("credentials.create.policy"), "default")
+  .action(async (name: string, options: { policy: string }) => {
+    await runCli(async () => {
+      const credential = await cliCall(() =>
+        client().createCredential({ username: name, policy: options.policy }),
+      );
+
+      if (emit(credential)) {
+        return;
+      }
+
+      console.log();
+      console.log(`  ${ok("✓")} ${t("credentials.create.done", { name: credential.username })}`);
+      console.log(`  ${t("credentials.create.password")}  ${bold(credential.password ?? "")}`);
+      const state = await cliCall(() => client().getLocalProxy());
+      console.log(
+        `  ${muted(t("credentials.create.hint"))}  ${bold(
+          `http://${credential.username}:${credential.password}@${state.address.replace("http://", "")}`,
+        )}`,
+      );
+      console.log();
+    });
+  });
+
+credentials
+  .command("remove")
+  .description(t("credentials.remove.description"))
+  .argument("<name>", t("credentials.remove.name"))
+  .action(async (name: string) => {
+    await runCli(async () => {
+      await cliCall(() => client().deleteCredential(name));
+      console.log(`  ${ok("✓")} ${t("credentials.remove.done", { name })}`);
+    });
+  });
+
 const scrape = program.command("scrape").description(t("scrape.group"));
 
 scrape

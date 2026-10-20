@@ -115,3 +115,25 @@ ports = []
 # itself belongs here: a connection to the proxy routed through a proxy is a
 # loop.
 always_direct = []
+
+[local_proxy]
+# A local port that speaks the HTTP proxy protocol.
+#
+# A program is pointed at it and never has to know which public proxy is
+# carrying its traffic. The credential it authenticates with decides how the
+# traffic is carried: a sticky session, a rotation by time, or a new proxy
+# for every request.
+#
+# It is off by default. A port that proxies whatever is asked of it is an
+# open door, and the operator is the one who decides to open it.
+enabled = false
+host = "127.0.0.1"
+port = 9098
+# Whether a client without a credential is let in. The credential is what
+# carries the policy, so without one there is nothing that says how the
+# traffic should be carried.
+allow_anonymous = false
+# How many proxies are tried before the client is refused.
+max_attempts = 5
+# The budget for opening one tunnel, in seconds.
+timeout_secs = 10

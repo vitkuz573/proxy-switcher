@@ -158,5 +158,70 @@
     "description": "Description:",
     "version": "output the version number",
     "option": "display help for command"
+  },
+  "proxy": {
+    "group": "The local proxy a program can be pointed at",
+    "status": {
+      "description": "What the local proxy is doing",
+      "title": "Local proxy",
+      "address": "Address",
+      "off": "off",
+      "current": "Proxy in front",
+      "connections": "Connections",
+      "tunnels": "Tunnels opened",
+      "sessions": "Sticky sessions",
+      "rotations": "Rotations",
+      "failures": "Failures",
+      "refused": "Refused",
+      "traffic": "Traffic",
+      "hint": "Point a program at"
+    }
+  },
+  "policies": {
+    "group": "The policies a credential may carry",
+    "list": {
+      "title": "Policies: {count}",
+      "description": "Every policy",
+      "name": "Policy",
+      "rotation": "Rotation",
+      "countries": "Countries"
+    },
+    "create": {
+      "description": "Write a policy down",
+      "name": "policy",
+      "rotation": "rotation: sticky, per_request or time",
+      "countries": "the countries allowed, as ISO codes",
+      "sticky": "how long a client keeps its proxy, in seconds",
+      "interval": "how often the proxy in front is replaced, in seconds",
+      "done": "The policy {name} is written down."
+    },
+    "remove": {
+      "description": "Remove a policy",
+      "name": "policy",
+      "done": "The policy {name} is gone."
+    }
+  },
+  "credentials": {
+    "group": "The credentials the local proxy accepts",
+    "list": {
+      "title": "Credentials: {count}",
+      "description": "Every credential",
+      "name": "Name",
+      "policy": "Policy",
+      "created": "Created"
+    },
+    "create": {
+      "description": "Create a credential",
+      "name": "name",
+      "policy": "the policy the credential carries",
+      "done": "The credential {name} is created.",
+      "password": "Password",
+      "hint": "Point a program at"
+    },
+    "remove": {
+      "description": "Remove a credential",
+      "name": "name",
+      "done": "The credential {name} is gone."
+    }
   }
 }

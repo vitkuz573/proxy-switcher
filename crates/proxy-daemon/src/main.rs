@@ -438,6 +438,48 @@ async fn main() -> anyhow::Result<()> {
     let policy_destinations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let policy_routes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
+    // The credentials the local proxy accepts, and the policies they carry.
+    let credentials = match db_path.as_ref() {
+        Some(path) => match proxy_core::credentials::CredentialStore::open(path) {
+            Ok(store) => {
+                let store = Arc::new(store);
+                if let Err(e) = store.ensure_builtin_policies().await {
+                    error!("could not write the built-in policies: {e}");
+                }
+                Some(store)
+            }
+            Err(e) => {
+                error!("could not open the credential store: {e}");
+                None
+            }
+        },
+        None => None,
+    };
+
+    // The local proxy: a port a program can be pointed at.
+    let local_proxy = Arc::new(proxy_core::local_proxy::LocalProxy::new(
+        proxy_core::local_proxy::LocalProxyConfig {
+            enabled: config.local_proxy.enabled,
+            host: config.local_proxy.host.clone(),
+            port: config.local_proxy.port,
+            allow_anonymous: config.local_proxy.allow_anonymous,
+            max_attempts: config.local_proxy.max_attempts,
+            timeout: std::time::Duration::from_secs(config.local_proxy.timeout_secs),
+        },
+        pool.clone(),
+        Some(bypass_mark),
+        credentials.clone(),
+    ));
+
+    if config.local_proxy.enabled {
+        let proxy = local_proxy.clone();
+        tokio::spawn(async move {
+            if let Err(e) = proxy.serve().await {
+                error!("the local proxy stopped: {e}");
+            }
+        });
+    }
+
     let app_state = api::AppState {
         history: history.clone(),
         min_score: config.pool.min_score,
@@ -455,6 +497,8 @@ async fn main() -> anyhow::Result<()> {
         policy_destinations: policy_destinations.clone(),
         policy_routes: policy_routes.clone(),
         remembered_active: remembered_active.clone(),
+        local_proxy: local_proxy.clone(),
+        credentials: credentials.clone(),
         bypass_mark,
         default_route: config.tun.default_route,
         probe_schedule: probe_schedule.clone(),
@@ -604,11 +648,40 @@ async fn main() -> anyhow::Result<()> {
                             let mut failed = 0usize;
                             let mut inconclusive = 0usize;
 
+                            // When the pool was last written down.
+                            let mut last_persisted = std::time::Instant::now();
+
                             // Rounds, until the pool has nothing left that is
                             // due. Each round is a bounded number of proxies,
                             // so the memory a check needs is a round and not
                             // the pool.
                             loop {
+                                // The pool is written down while the batch
+                                // runs.
+                                //
+                                // A batch of the whole pool takes half an
+                                // hour, and the state it collects is worth
+                                // more than the state it had before: a
+                                // restart in the middle of a batch used to
+                                // throw away every confirmation the batch
+                                // had made.
+                                if last_persisted.elapsed() >= std::time::Duration::from_secs(300) {
+                                    last_persisted = std::time::Instant::now();
+
+                                    if let Some(path) = batch_path.clone() {
+                                        let snapshot = pc.all().await;
+                                        match tokio::task::spawn_blocking(move || {
+                                            Storage::open(&path)?.replace_proxies(&snapshot)
+                                        })
+                                        .await
+                                        {
+                                            Ok(Ok(())) => {}
+                                            Ok(Err(e)) => error!("Failed to persist pool: {e}"),
+                                            Err(e) => error!("Persist task failed: {e}"),
+                                        }
+                                    }
+                                }
+
                                 let round = pc.due_batch(chrono::Utc::now(), ROUND_SIZE).await;
                                 if round.is_empty() {
                                     break;
@@ -931,6 +1004,23 @@ async fn main() -> anyhow::Result<()> {
 
     tun.request_shutdown();
     tun.cleanup().await;
+
+    // The pool is written down on the way out.
+    //
+    // The health checks spend half an hour on a full pass, and a restart in
+    // the middle of one used to throw away every confirmation the pass had
+    // made. The state is worth more than the time it takes to write.
+    if let Some(path) = db_path.clone() {
+        let snapshot = pool.all().await;
+        match tokio::task::spawn_blocking(move || Storage::open(&path)?.replace_proxies(&snapshot))
+            .await
+        {
+            Ok(Ok(())) => info!("the pool was written down on the way out"),
+            Ok(Err(e)) => error!("could not write the pool down: {e}"),
+            Err(e) => error!("the write-down task failed: {e}"),
+        }
+    }
+
     Ok(())
 }
 
