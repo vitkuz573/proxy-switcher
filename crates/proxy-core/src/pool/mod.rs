@@ -52,6 +52,14 @@ struct PoolInner {
     /// a batch with thousands of evictions into thousands of full rebuilds.
     /// They are collected here and applied in one pass at the end of the batch.
     pending_eviction: HashSet<String>,
+    /// The proxies that were removed and must not come back.
+    ///
+    /// The sources repeat the same dead proxies on every scrape. Without this
+    /// the pool filled up again right after it was thinned out, and the
+    /// checks were spent on proxies that had already been condemned — the
+    /// working set grew more slowly than it should, because the budget went
+    /// on the dead.
+    condemned: HashSet<String>,
 }
 
 /// When each proxy should be probed again.
@@ -147,6 +155,12 @@ impl ProxyPool {
         }
 
         for proxy in discovered {
+            // A proxy that was condemned does not come back: the source
+            // offers it again, and it is as dead as it was.
+            if inner.condemned.contains(&proxy.id) {
+                continue;
+            }
+
             match inner.index.get(&proxy.id) {
                 Some(&i) => {
                     // Refresh descriptive fields a source may have corrected,
@@ -273,8 +287,27 @@ impl ProxyPool {
 
         let condemned = std::mem::take(&mut inner.pending_eviction);
         let count = condemned.len();
+
+        for id in &condemned {
+            inner.condemned.insert(id.clone());
+        }
+
         self.retain(&mut inner, |p| !condemned.contains(&p.id));
         count
+    }
+
+    /// The proxies that must not come back.
+    pub async fn condemned(&self) -> Vec<String> {
+        let inner = self.inner.read().await;
+        inner.condemned.iter().cloned().collect()
+    }
+
+    /// Remember the proxies that must not come back.
+    pub async fn remember_condemned(&self, ids: Vec<String>) {
+        let mut inner = self.inner.write().await;
+        for id in ids {
+            inner.condemned.insert(id);
+        }
     }
 
     /// Insert records exactly as they are, preserving their health state.

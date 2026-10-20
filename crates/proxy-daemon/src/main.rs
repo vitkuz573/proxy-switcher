@@ -279,6 +279,19 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // The proxies that were condemned are remembered as well. The sources
+    // offer them again on every scrape, and without this the pool fills up
+    // with proxies that have already been found dead.
+    if let Some(path) = db_path.as_ref() {
+        let condemned = Storage::open(path)
+            .and_then(|storage| storage.load_condemned())
+            .unwrap_or_default();
+
+        if !condemned.is_empty() {
+            pool.remember_condemned(condemned).await;
+        }
+    }
+
     // The pool is geolocated after it is restored, for the proxies that were
     // verified before the last restart.
     if let Some(database) = geo_database.as_ref() {
@@ -811,8 +824,11 @@ async fn main() -> anyhow::Result<()> {
                             // opened for the write and dropped again.
                             if let Some(path) = batch_path {
                                 let snapshot = pc.all().await;
+                                let condemned = pc.condemned().await;
                                 match tokio::task::spawn_blocking(move || {
-                                    Storage::open(&path)?.replace_proxies(&snapshot)
+                                    let storage = Storage::open(&path)?;
+                                    storage.replace_proxies(&snapshot)?;
+                                    storage.save_condemned(&condemned)
                                 })
                                 .await
                                 {

@@ -43,6 +43,10 @@ impl Storage {
                 settings TEXT NOT NULL,
                 builtin INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS condemned (
+                id TEXT PRIMARY KEY,
+                at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
             CREATE TABLE IF NOT EXISTS proxy_credentials (
                 username TEXT PRIMARY KEY,
                 salt TEXT NOT NULL,
@@ -143,6 +147,33 @@ impl Storage {
             rusqlite::params![name],
         )?;
         Ok(removed > 0)
+    }
+
+    /// The proxies that must not come back.
+    pub fn load_condemned(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT id FROM condemned ORDER BY at DESC LIMIT 500000")?;
+        let mut rows = stmt.query([])?;
+
+        let mut ids = Vec::new();
+        while let Some(row) = rows.next()? {
+            ids.push(row.get(0)?);
+        }
+        Ok(ids)
+    }
+
+    /// Remember the proxies that must not come back.
+    pub fn save_condemned(&self, ids: &[String]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare_cached("INSERT OR IGNORE INTO condemned (id) VALUES (?1)")?;
+            for id in ids {
+                stmt.execute(rusqlite::params![id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Every credential, without its secret.
