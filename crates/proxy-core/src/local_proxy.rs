@@ -26,6 +26,7 @@
 //! itself through a proxy, which is a loop that never ends.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -42,6 +43,14 @@ use crate::pool::ProxyPool;
 use crate::proxy::connector::base::{Carriage, ConnectOptions, Target};
 use crate::proxy::connector::BoxedStream;
 use crate::proxy::ProxyInfo;
+
+/// How long a tunnel may stay silent before it is called half dead.
+///
+/// A proxy that accepts the connection and then says nothing is the worst
+/// kind: the client waits for an answer that never comes, and the proxy looks
+/// alive to every check that only looks at the connection. The first
+/// exchange is what tells the two apart.
+const FIRST_EXCHANGE_BUDGET: Duration = Duration::from_secs(20);
 
 /// How the local proxy behaves.
 #[derive(Debug, Clone)]
@@ -332,7 +341,7 @@ impl LocalProxy {
         // port and then talks to the console on the same host would be
         // talking to itself through a proxy.
         if is_local_target(&target) {
-            return self.serve_direct(&mut client, &request, &target).await;
+            return self.serve_direct(client, &request, &target).await;
         }
 
         let proxy = self.proxy_for(&identity, &policy).await;
@@ -340,19 +349,12 @@ impl LocalProxy {
 
         match request.method.as_str() {
             "CONNECT" => {
-                self.serve_tunnel(&mut client, &target, proxy, &identity, sticky_secs)
+                self.serve_tunnel(client, &target, proxy, &identity, sticky_secs)
                     .await
             }
             _ => {
-                self.serve_request(
-                    &mut client,
-                    &request,
-                    &target,
-                    proxy,
-                    &identity,
-                    sticky_secs,
-                )
-                .await
+                self.serve_request(client, &request, &target, proxy, &identity, sticky_secs)
+                    .await
             }
         }
     }
@@ -654,7 +656,7 @@ impl LocalProxy {
     /// Carry a tunnel: `CONNECT host:port`.
     async fn serve_tunnel(
         &self,
-        client: &mut tokio::net::TcpStream,
+        mut client: tokio::net::TcpStream,
         target: &Target,
         proxy: Option<ProxyInfo>,
         identity: &str,
@@ -663,7 +665,7 @@ impl LocalProxy {
         let Some(proxy) = proxy else {
             return self
                 .refuse(
-                    client,
+                    &mut client,
                     502,
                     "Bad Gateway",
                     "no proxy matches the policy of this credential",
@@ -676,7 +678,7 @@ impl LocalProxy {
             Err(e) => {
                 return self
                     .refuse(
-                        client,
+                        &mut client,
                         502,
                         "Bad Gateway",
                         &format!("no proxy could carry the connection: {e}"),
@@ -700,13 +702,13 @@ impl LocalProxy {
 
         self.stats.tunnels.fetch_add(1, Ordering::Relaxed);
 
-        self.pipe(client, upstream).await
+        self.pipe(client, upstream, Some(&carried)).await
     }
 
     /// Carry an ordinary request: the request line holds an absolute URI.
     async fn serve_request(
         &self,
-        client: &mut tokio::net::TcpStream,
+        mut client: tokio::net::TcpStream,
         request: &RequestHead,
         target: &Target,
         proxy: Option<ProxyInfo>,
@@ -716,7 +718,7 @@ impl LocalProxy {
         let Some(proxy) = proxy else {
             return self
                 .refuse(
-                    client,
+                    &mut client,
                     502,
                     "Bad Gateway",
                     "no proxy matches the policy of this credential",
@@ -731,8 +733,11 @@ impl LocalProxy {
                     self.pin_session(identity, &carried, sticky_secs).await;
                     upstream.write_all(&request.raw).await?;
                     upstream.flush().await?;
+                    self.stats
+                        .bytes_out
+                        .fetch_add(request.raw.len() as u64, Ordering::Relaxed);
                     self.stats.tunnels.fetch_add(1, Ordering::Relaxed);
-                    return self.pipe(client, upstream).await;
+                    return self.pipe(client, upstream, Some(&carried)).await;
                 }
                 Err(e) => {
                     // A proxy that refuses CONNECT may still forward plain
@@ -742,7 +747,7 @@ impl LocalProxy {
                     if !Carriage::is_plain_http(target.port) {
                         return self
                             .refuse(
-                                client,
+                                &mut client,
                                 502,
                                 "Bad Gateway",
                                 &format!("no proxy could carry the connection: {e}"),
@@ -756,7 +761,7 @@ impl LocalProxy {
         if !Carriage::is_plain_http(target.port) {
             return self
                 .refuse(
-                    client,
+                    &mut client,
                     502,
                     "Bad Gateway",
                     "the proxy in front cannot carry a tunnel to this port",
@@ -778,7 +783,7 @@ impl LocalProxy {
                 self.record_failure(&proxy).await;
                 return self
                     .refuse(
-                        client,
+                        &mut client,
                         502,
                         "Bad Gateway",
                         &format!("the proxy failed: {e}"),
@@ -808,7 +813,7 @@ impl LocalProxy {
     /// Carry a request to a local address, without a proxy.
     async fn serve_direct(
         &self,
-        client: &mut tokio::net::TcpStream,
+        mut client: tokio::net::TcpStream,
         request: &RequestHead,
         target: &Target,
     ) -> Result<()> {
@@ -822,7 +827,7 @@ impl LocalProxy {
             Ok(Err(e)) => {
                 return self
                     .refuse(
-                        client,
+                        &mut client,
                         502,
                         "Bad Gateway",
                         &format!("the host refused: {e}"),
@@ -832,7 +837,7 @@ impl LocalProxy {
             Err(_) => {
                 return self
                     .refuse(
-                        client,
+                        &mut client,
                         504,
                         "Gateway Timeout",
                         "the host did not answer in time",
@@ -845,7 +850,7 @@ impl LocalProxy {
         upstream.write_all(&request.raw).await?;
         upstream.flush().await?;
 
-        self.pipe(client, upstream).await
+        self.pipe(client, upstream, None).await
     }
 
     /// Open a tunnel through a proxy, moving on when the proxy is dead.
@@ -963,33 +968,129 @@ impl LocalProxy {
     }
 
     /// Carry bytes in both directions until one side stops.
+    ///
+    /// The first exchange has a budget. A proxy that accepts the connection
+    /// and then says nothing is half dead: the client would wait for an
+    /// answer that never comes, and the proxy looks alive to every check that
+    /// only looks at the connection. When the budget runs out, the proxy is
+    /// marked as failed and the tunnel is dropped, so the client learns at
+    /// once that the address did not come through.
+    ///
+    /// The bytes are counted as they move, not when the connection ends: a
+    /// tunnel that is open for an hour carries traffic the whole time, and a
+    /// counter that waits for the end says nothing until then.
     async fn pipe(
         &self,
-        client: &mut tokio::net::TcpStream,
-        mut upstream: BoxedStream,
+        client: tokio::net::TcpStream,
+        upstream: BoxedStream,
+        proxy: Option<&ProxyInfo>,
     ) -> Result<()> {
-        // A connection that has been idle for a long time is finished. The
-        // client is gone or the target is silent; either way the tunnel has
-        // served its purpose.
-        let idle = self.config.timeout * 60;
+        let (mut client_read, mut client_write) = client.into_split();
+        let upstream = Box::pin(upstream);
+        let (upstream_read, upstream_write) = tokio::io::split(upstream);
 
-        match tokio::time::timeout(idle, tokio::io::copy_bidirectional(client, &mut upstream)).await
+        let client_spoke = Arc::new(AtomicBool::new(false));
+        let target_spoke = Arc::new(AtomicBool::new(false));
+        let stats = self.stats.clone();
+
+        // The cancellation the watchdog uses to end both directions.
+        let (cancel, cancelled) = tokio::sync::watch::channel(false);
+
+        // The two directions are moved by two tasks, so a slow side does not
+        // hold the other one.
         {
-            Ok(result) => {
-                let (from_client, from_upstream) = result?;
-                self.stats
-                    .bytes_out
-                    .fetch_add(from_client, Ordering::Relaxed);
-                self.stats
-                    .bytes_in
-                    .fetch_add(from_upstream, Ordering::Relaxed);
-                Ok(())
-            }
-            Err(_) => {
-                let _ = client.shutdown().await;
-                Ok(())
-            }
+            let client_spoke = client_spoke.clone();
+            let stats = stats.clone();
+            let mut cancelled = cancelled.clone();
+            let mut upstream_write = upstream_write;
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 32 * 1024];
+                let mut first = true;
+
+                loop {
+                    let n = tokio::select! {
+                        _ = cancelled.changed() => break,
+                        read = read_next(&mut client_read, &mut buf, &mut first) => match read {
+                            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                            Ok(Ok(n)) => n,
+                        },
+                    };
+
+                    client_spoke.store(true, Ordering::Relaxed);
+                    stats.bytes_out.fetch_add(n as u64, Ordering::Relaxed);
+
+                    if upstream_write.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                    let _ = upstream_write.flush().await;
+                }
+            });
         }
+
+        {
+            let target_spoke = target_spoke.clone();
+            let stats = stats.clone();
+            let mut cancelled = cancelled.clone();
+            let mut upstream_read = upstream_read;
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 32 * 1024];
+                let mut first = true;
+
+                loop {
+                    let n = tokio::select! {
+                        _ = cancelled.changed() => break,
+                        read = read_next(&mut upstream_read, &mut buf, &mut first) => match read {
+                            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                            Ok(Ok(n)) => n,
+                        },
+                    };
+
+                    target_spoke.store(true, Ordering::Relaxed);
+                    stats.bytes_in.fetch_add(n as u64, Ordering::Relaxed);
+
+                    if client_write.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                    let _ = client_write.flush().await;
+                }
+            });
+        }
+
+        // The watchdog.
+        //
+        // A tunnel that carries nothing in either direction within the
+        // budget is half dead: the proxy took the connection and says
+        // nothing. The proxy is marked as failed, and the client is let go at
+        // once instead of waiting for an answer that is not coming.
+        if let Some(proxy) = proxy {
+            let client_spoke = client_spoke.clone();
+            let target_spoke = target_spoke.clone();
+            let stats = stats.clone();
+            let pool = self.pool.clone();
+            let proxy = proxy.clone();
+
+            tokio::spawn(async move {
+                tokio::time::sleep(FIRST_EXCHANGE_BUDGET).await;
+
+                if !client_spoke.load(Ordering::Relaxed) || target_spoke.load(Ordering::Relaxed) {
+                    return;
+                }
+
+                warn!(
+                    "the proxy {} carried nothing and is called half dead",
+                    proxy.id
+                );
+                stats.failures.fetch_add(1, Ordering::Relaxed);
+                pool.report_failure(&proxy.id).await;
+
+                // Both directions are ended, and the client is let go: a
+                // connection that will never carry anything is worse than a
+                // closed one.
+                let _ = cancel.send(true);
+            });
+        }
+
+        Ok(())
     }
 
     /// Tell the client that the request cannot be carried.
@@ -1014,6 +1115,26 @@ impl LocalProxy {
             .await?;
         client.shutdown().await?;
         Ok(())
+    }
+}
+
+/// Read what is available, the first time within the budget.
+///
+/// The first read of a direction has a budget: a tunnel that carries nothing
+/// in that direction within it is not carrying anything at all.
+async fn read_next<R>(
+    reader: &mut R,
+    buf: &mut [u8],
+    first: &mut bool,
+) -> Result<Result<usize, std::io::Error>, tokio::time::error::Elapsed>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    if *first {
+        *first = false;
+        tokio::time::timeout(FIRST_EXCHANGE_BUDGET, reader.read(buf)).await
+    } else {
+        Ok(reader.read(buf).await)
     }
 }
 

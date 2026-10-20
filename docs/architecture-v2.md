@@ -205,7 +205,7 @@ For the same reason the probe target is chosen carefully. It is a third
 party, and in some networks most of them are unreachable, so there are
 several, and the engine verifies one directly before using it. The batch
 still runs when none of them answer — the proxies are on other networks, and a
-target that is blocked here may be perfectly reachable through one. A target
+target the engine cannot reach may be perfectly reachable through one. A target
 that is genuinely down produces inconclusive verdicts, which change nothing in
 the pool. The failure mode this avoids is the worst one: an unreachable probe
 target emptying a pool of fifteen thousand good proxies.

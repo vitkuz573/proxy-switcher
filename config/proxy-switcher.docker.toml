@@ -66,10 +66,24 @@ inconclusive_backoff_secs = 300
 # engine verifies a target directly before using it, so an unreachable target
 # pauses the checks instead of marking the whole pool dead.
 target_urls = [
+    # Reports the address the request came from, in a single line.
+    #
+    # The order matters for the check the engine makes of itself: the first
+    # target that answers directly is the one whose answer says what the
+    # engine's own address is. A target the engine cannot reach may still
+    # answer through a proxy, which sits on another network — so every target
+    # is tried before a proxy is given up on.
+    "http://l2.io/ip",
+    "http://ifconfig.co/ip",
+    # Reports both the source address and the request headers, which is what
+    # says whether the proxy leaked the client's address.
+    "http://httpbin.org/anything",
+    # Faster fallbacks that report only the address.
     "http://icanhazip.com",
     "http://api.ipify.org",
     "http://ifconfig.me/ip",
 ]
+
 max_consecutive_failures = 3
 # How long a proxy that has never worked is kept before it leaves the pool.
 unverified_ttl_secs = 3600

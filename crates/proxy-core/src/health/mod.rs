@@ -596,6 +596,32 @@ impl HealthChecker {
             .and_then(|slot| slot.as_ref().map(|t| t.url.clone()))
     }
 
+    /// The targets the probes may use.
+    ///
+    /// A proxy is only known to work when a target answers through it. The
+    /// targets are not equally reachable from everywhere: the network a
+    /// proxy sits on may be unable to see the target the engine itself
+    /// reaches, and the other way round. A probe that proves nothing — the
+    /// target did not answer — therefore moves on to the next target, and the
+    /// working set is every proxy that can reach at least one of them.
+    pub fn targets(&self, own_exit_ip: Option<std::net::IpAddr>) -> Vec<ActiveTarget> {
+        self.target_urls
+            .iter()
+            .map(|url| {
+                let (host, port, path) = parse_target(url);
+                ActiveTarget {
+                    url: url.clone(),
+                    host,
+                    port,
+                    path,
+                    own_exit_ip,
+                    verified: own_exit_ip.is_some(),
+                    checked_at: std::time::Instant::now(),
+                }
+            })
+            .collect()
+    }
+
     /// Find a target the engine can actually reach.
     ///
     /// The target is requested directly, without a proxy, and the address the
@@ -714,21 +740,45 @@ impl HealthChecker {
     /// Probe a single proxy, taking one concurrency permit.
     pub async fn check(&self, proxy: &ProxyInfo) -> HealthResult {
         let _permit = self.concurrency.acquire().await.expect("Semaphore closed");
-        let Some(target) = self.resolve_target().await else {
-            return HealthResult::inconclusive(&proxy.id, "no reachable probe target");
-        };
-        check_one(
-            proxy,
-            &target.host,
-            target.port,
-            &target.path,
-            self.connect_timeout,
-            self.timeout,
-            self.mark,
-            target.own_exit_ip,
-            &self.forwarder,
-        )
-        .await
+        let target = self.resolve_target().await;
+        let own_exit_ip = target.as_ref().and_then(|target| target.own_exit_ip);
+        let targets = self.targets(own_exit_ip);
+
+        self.probe_against(proxy, &targets).await
+    }
+
+    /// Probe a proxy against the targets, in order, until one of them answers.
+    ///
+    /// A verdict that proves something — the proxy works, or the proxy is
+    /// broken — ends the probe. A verdict that proves nothing means the
+    /// target did not answer, and the next target is given a chance.
+    async fn probe_against(&self, proxy: &ProxyInfo, targets: &[ActiveTarget]) -> HealthResult {
+        let mut inconclusive: Option<HealthResult> = None;
+
+        for target in targets {
+            let result = check_one(
+                proxy,
+                &target.host,
+                target.port,
+                &target.path,
+                self.connect_timeout,
+                self.timeout,
+                self.mark,
+                target.own_exit_ip,
+                &self.forwarder,
+            )
+            .await;
+
+            if result.verdict != Verdict::Inconclusive {
+                return result;
+            }
+
+            inconclusive = Some(result);
+        }
+
+        inconclusive.unwrap_or_else(|| {
+            HealthResult::inconclusive(&proxy.id, "no probe target is configured")
+        })
     }
 
     /// Probe every proxy with bounded concurrency.
@@ -761,14 +811,14 @@ impl HealthChecker {
         // be perfectly reachable through a proxy. The batch runs anyway; a
         // target that is genuinely down produces inconclusive verdicts, which
         // change nothing in the pool.
-        let Some(target) = self.resolve_target().await else {
+        let resolved = self.resolve_target().await;
+        let own_exit_ip = resolved.as_ref().and_then(|target| target.own_exit_ip);
+        let targets = self.targets(own_exit_ip);
+
+        if targets.is_empty() {
             tracing::error!("no probe target is configured; skipping the batch");
             return CheckCounts::default();
-        };
-        let host = target.host.clone();
-        let path = target.path.clone();
-        let port = target.port;
-        let own_exit_ip = target.own_exit_ip;
+        }
 
         // Channel capacity equals the batch size, so probe tasks never block on
         // the result send and the drain loop is not part of the critical path.
@@ -786,8 +836,7 @@ impl HealthChecker {
                 .expect("Semaphore closed");
             let timeout = self.timeout;
             let connect_timeout = self.connect_timeout;
-            let host = host.clone();
-            let path = path.clone();
+            let targets = targets.clone();
             let mark = self.mark;
             let forwarder = self.forwarder.clone();
             let tx = tx.clone();
@@ -795,20 +844,42 @@ impl HealthChecker {
 
             tokio::spawn(async move {
                 let _permit = permit;
-                let result = check_one(
-                    &proxy,
-                    &host,
-                    port,
-                    &path,
-                    connect_timeout,
-                    timeout,
-                    mark,
-                    own_exit_ip,
-                    &forwarder,
-                )
-                .await;
+
+                // The targets are tried in order, until one of them answers.
+                // A proxy that cannot see the first target may well see the
+                // second, and the working set is every proxy that can reach
+                // at least one of them.
+                let mut inconclusive: Option<HealthResult> = None;
+
+                for target in &targets {
+                    let result = check_one(
+                        &proxy,
+                        &target.host,
+                        target.port,
+                        &target.path,
+                        connect_timeout,
+                        timeout,
+                        mark,
+                        target.own_exit_ip,
+                        &forwarder,
+                    )
+                    .await;
+
+                    if result.verdict != Verdict::Inconclusive {
+                        checked.fetch_add(1, Ordering::Relaxed);
+                        let _ = tx.send(result).await;
+                        return;
+                    }
+
+                    inconclusive = Some(result);
+                }
+
                 checked.fetch_add(1, Ordering::Relaxed);
-                let _ = tx.send(result).await;
+                let _ = tx
+                    .send(inconclusive.unwrap_or_else(|| {
+                        HealthResult::inconclusive(&proxy.id, "no probe target is configured")
+                    }))
+                    .await;
             });
         }
         drop(tx);
