@@ -650,7 +650,13 @@ async fn main() -> anyhow::Result<()> {
                         {
                             let mut s = scrape_state_clone.write().await;
                             s.check_running = true;
-                            s.check_total = due_total;
+                            // The pool is the denominator: the progress says
+                            // how much of the pool has been looked at. The
+                            // number that was due is not it — the proxies
+                            // that proved nothing are looked at again
+                            // sooner, and the counter goes past the number
+                            // that was due at the start.
+                            s.check_total = pool_total;
                         }
 
                         // The counter belongs to the batch: the rounds that
