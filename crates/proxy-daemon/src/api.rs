@@ -1095,7 +1095,17 @@ async fn create_scrape_run(State(state): State<AppState>) -> Response {
         let mut failed = 0usize;
         let mut inconclusive = 0usize;
 
+        // The round has a deadline, for the same reason the scheduled one
+        // has: the proxies that failed are looked at again after a while, so
+        // something is always due and the loop would never end.
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(schedule.working_interval_secs);
+
         loop {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+
             let round = pool.due_batch(chrono::Utc::now(), 20_000).await;
             if round.is_empty() {
                 break;

@@ -691,11 +691,33 @@ async fn main() -> anyhow::Result<()> {
                             // When the pool was last written down.
                             let mut last_persisted = std::time::Instant::now();
 
+                            // The round has a deadline.
+                            //
+                            // The loop used to end when nothing was due, and
+                            // that never happened: the proxies that failed
+                            // are looked at again after a while, so something
+                            // was always due and the round never ended. The
+                            // sweep that removes the condemned ran at the end
+                            // of the round, so it never ran at all.
+                            //
+                            // The round now covers the pool once and stops.
+                            // A working proxy is looked at again after the
+                            // interval, and the next round picks up whatever
+                            // is due by then.
+                            let deadline = std::time::Instant::now()
+                                + std::time::Duration::from_secs(
+                                    batch_schedule.working_interval_secs as u64,
+                                );
+
                             // Rounds, until the pool has nothing left that is
                             // due. Each round is a bounded number of proxies,
                             // so the memory a check needs is a round and not
                             // the pool.
                             loop {
+                                if std::time::Instant::now() >= deadline {
+                                    info!("the round has covered the pool and stops here");
+                                    break;
+                                }
                                 // The pool is written down while the batch
                                 // runs.
                                 //
