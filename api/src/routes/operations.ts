@@ -117,7 +117,7 @@ export async function operationRoutes(app: FastifyInstance): Promise<void> {
       const body = req.body as {
         host: string;
         port: number;
-        protocol?: "http" | "https" | "socks4" | "socks5";
+        protocol?: "http" | "https" | "socks4" | "socks5" | "trojan" | "shadowsocks";
         country?: string;
       };
 

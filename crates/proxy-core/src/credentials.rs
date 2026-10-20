@@ -546,6 +546,7 @@ mod tests {
             first_seen: Utc::now(),
             next_probe_at: Utc::now(),
             password: None,
+            cipher: None,
             supports_tunnel: true,
             exit_ip: None,
             consecutive_failures: 0,

@@ -288,6 +288,7 @@ fn build(
         supports_tunnel: true,
         exit_ip: None,
         password: None,
+        cipher: None,
         consecutive_failures: 0,
         score: 0.0,
     })

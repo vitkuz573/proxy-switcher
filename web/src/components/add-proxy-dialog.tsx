@@ -24,7 +24,7 @@ import {
 } from "@/components/ui/select";
 import { api } from "@/lib/client";
 
-const PROTOCOLS: ProxyProtocol[] = ["http", "https", "socks4", "socks5"];
+const PROTOCOLS: ProxyProtocol[] = ["http", "https", "socks4", "socks5", "trojan", "shadowsocks"];
 const ANONYMITY: Anonymity[] = ["transparent", "anonymous", "elite", "unknown"];
 
 export function AddProxyDialog({

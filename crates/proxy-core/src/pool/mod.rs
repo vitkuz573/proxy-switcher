@@ -888,6 +888,7 @@ mod tests {
             next_probe_at: chrono::Utc::now(),
             exit_ip: None,
             password: None,
+            cipher: None,
             supports_tunnel: true,
             consecutive_failures: 0,
             score: 0.0,
@@ -1232,6 +1233,7 @@ mod tests {
             exit_ip: None,
             supports_tunnel: true,
             password: None,
+            cipher: None,
             consecutive_failures: 0,
             score: 0.9,
         };
@@ -1274,6 +1276,7 @@ mod tests {
             exit_ip: None,
             supports_tunnel: true,
             password: None,
+            cipher: None,
             consecutive_failures: 0,
             score: 0.5,
         };
@@ -1311,6 +1314,7 @@ mod tests {
             exit_ip: None,
             supports_tunnel: true,
             password: None,
+            cipher: None,
             consecutive_failures: 0,
             score: 0.0,
         };

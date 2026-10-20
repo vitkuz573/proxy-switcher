@@ -44,7 +44,14 @@ fn parse_trojan(rest: &str) -> Option<ProxyInfo> {
 
     let (host, port) = split_host_port(host_port.split('?').next().unwrap_or(host_port))?;
 
-    build(ProxyProtocol::Trojan, &host, port, Some(password), None)
+    build(
+        ProxyProtocol::Trojan,
+        &host,
+        port,
+        Some(password),
+        None,
+        None,
+    )
 }
 
 /// `ss://base64(method:password)@host:port` or `ss://base64(method:password@host:port)`
@@ -74,21 +81,16 @@ fn build_shadowsocks(credentials: &str, host_port: &str) -> Option<ProxyInfo> {
     let (method, password) = credentials.split_once(':')?;
     let (host, port) = split_host_port(host_port)?;
 
-    // Shadowsocks is a different protocol from the one the connector table
-    // knows, so the method travels with the record.
-    let mut proxy = build(
-        ProxyProtocol::Socks5,
+    // The method travels with the record: the same password under a
+    // different cipher is a different session.
+    build(
+        ProxyProtocol::Shadowsocks,
         &host,
         port,
         Some(password.to_string()),
+        Some(method.to_string()),
         None,
-    );
-    if let Some(proxy) = proxy.as_mut() {
-        proxy.protocol = ProxyProtocol::Socks5;
-    }
-    let _ = method;
-
-    proxy
+    )
 }
 
 /// `socks5://[user:password@]host:port`
@@ -105,7 +107,7 @@ fn parse_socks(rest: &str) -> Option<ProxyInfo> {
         .map(|(_, password)| password.to_string())
         .filter(|p| !p.is_empty());
 
-    build(ProxyProtocol::Socks5, &host, port, password, None)
+    build(ProxyProtocol::Socks5, &host, port, password, None, None)
 }
 
 /// `http://[user:password@]host:port`
@@ -122,7 +124,7 @@ fn parse_http(rest: &str) -> Option<ProxyInfo> {
         .map(|(_, password)| password.to_string())
         .filter(|p| !p.is_empty());
 
-    build(ProxyProtocol::Http, &host, port, password, None)
+    build(ProxyProtocol::Http, &host, port, password, None, None)
 }
 
 /// Split `host:port`, taking the port as the last numeric part.
@@ -215,6 +217,7 @@ fn build(
     host: &str,
     port: u16,
     password: Option<String>,
+    cipher: Option<String>,
     country: Option<String>,
 ) -> Option<ProxyInfo> {
     if host.is_empty() || port == 0 {
@@ -237,6 +240,7 @@ fn build(
         next_probe_at: now,
         supports_tunnel: true,
         exit_ip: None,
+        cipher: cipher.map(Into::into),
         password: password.map(Into::into),
         consecutive_failures: 0,
         score: 0.0,

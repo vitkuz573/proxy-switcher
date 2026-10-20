@@ -16,6 +16,7 @@ export const ProxyProtocolSchema = Type.Union([
   Type.Literal("socks4"),
   Type.Literal("socks5"),
   Type.Literal("trojan"),
+  Type.Literal("shadowsocks"),
 ]);
 export type ProxyProtocol = Static<typeof ProxyProtocolSchema>;
 
@@ -59,6 +60,8 @@ export const ProxyRecordSchema = Type.Object(
     exit_ip: Type.Union([Type.String(), Type.Null()]),
     /** Whether the proxy can carry a tunnel, or only plain HTTP. */
     supports_tunnel: Type.Boolean(),
+    /** The cipher a Shadowsocks proxy wants. */
+    cipher: Type.Optional(Type.String()),
   },
   { $id: "Proxy" },
 );

@@ -338,7 +338,7 @@ proxies
     async (
       host: string,
       port: string,
-      protocol: "http" | "https" | "socks4" | "socks5",
+      protocol: "http" | "https" | "socks4" | "socks5" | "trojan" | "shadowsocks",
       options: { country?: string },
     ) => {
       await runCli(async () => {

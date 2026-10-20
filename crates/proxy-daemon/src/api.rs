@@ -495,6 +495,7 @@ async fn create_proxy(State(state): State<AppState>, Json(input): Json<AddProxyI
         first_seen: chrono::Utc::now(),
         next_probe_at: chrono::Utc::now(),
         exit_ip: None,
+        cipher: None,
         password: None,
         supports_tunnel: true,
         consecutive_failures: 0,

@@ -160,6 +160,7 @@ async fn round_trip(certificate: TestCertificate, password: &str) -> Result<Vec<
         supports_tunnel: true,
         exit_ip: None,
         password: Some(password.into()),
+        cipher: None,
         consecutive_failures: 0,
         score: 0.0,
     };
@@ -219,6 +220,7 @@ async fn refuses_a_proxy_without_a_password() {
         supports_tunnel: true,
         exit_ip: None,
         password: None,
+        cipher: None,
         consecutive_failures: 0,
         score: 0.0,
     };

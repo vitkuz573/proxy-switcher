@@ -76,6 +76,7 @@ impl Storage {
             ("password", "TEXT"),
             ("country_reported", "TEXT"),
             ("supports_tunnel", "INTEGER NOT NULL DEFAULT 1"),
+            ("cipher", "TEXT"),
         ] {
             if !self.has_column("proxies", column)? {
                 self.conn.execute_batch(&format!(
@@ -272,8 +273,8 @@ impl Storage {
     pub fn save_proxies(&self, proxies: &[ProxyInfo]) -> Result<()> {
         let mut stmt = self.conn.prepare_cached(
             "INSERT OR REPLACE INTO proxies
-             (id, host, port, protocol, anonymity, latency_ms, country, country_reported, score, last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, password, supports_tunnel)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, $15, $16, $17)",
+             (id, host, port, protocol, anonymity, latency_ms, country, country_reported, score, last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, password, supports_tunnel, cipher)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, $15, $16, $17, $18)",
         )?;
 
         for p in proxies {
@@ -295,6 +296,7 @@ impl Storage {
                 p.exit_ip.map(|ip| ip.to_string()),
                 p.password,
                 p.supports_tunnel as i64,
+                p.cipher.as_deref(),
             ])?;
         }
         Ok(())
@@ -312,8 +314,8 @@ impl Storage {
 
         let mut stmt = tx.prepare_cached(
             "INSERT INTO proxies
-             (id, host, port, protocol, anonymity, latency_ms, country, country_reported, score, last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, password, supports_tunnel)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, $15, $16, $17)",
+             (id, host, port, protocol, anonymity, latency_ms, country, country_reported, score, last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, password, supports_tunnel, cipher)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, $15, $16, $17, $18)",
         )?;
 
         for p in proxies {
@@ -335,6 +337,7 @@ impl Storage {
                 p.exit_ip.map(|ip| ip.to_string()),
                 p.password,
                 p.supports_tunnel as i64,
+                p.cipher.as_deref(),
             ])?;
         }
 
@@ -386,7 +389,7 @@ impl Storage {
     pub fn load_proxies(&self) -> Result<Vec<ProxyInfo>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, host, port, protocol, anonymity, latency_ms, country, score,
-                    last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, password, supports_tunnel, country_reported
+                    last_checked, last_success, consecutive_failures, first_seen, next_probe_at, exit_ip, password, supports_tunnel, country_reported, cipher
              FROM proxies",
         )?;
 
@@ -417,6 +420,7 @@ impl Storage {
                 (None, country.or(stored_reported))
             };
             let password: Option<String> = row.get(14)?;
+            let cipher: Option<String> = row.get(17)?;
 
             Ok(ProxyInfo {
                 id: row.get(0)?,
@@ -444,6 +448,7 @@ impl Storage {
                 // probed, so it is assumed to tunnel until a probe says
                 // otherwise.
                 supports_tunnel: row.get::<_, Option<i64>>(15)?.unwrap_or(1) != 0,
+                cipher: cipher.map(Into::into),
                 consecutive_failures: row.get::<_, Option<i64>>(10)?.unwrap_or(0).max(0) as u32,
                 score: row.get(7)?,
             })
@@ -485,6 +490,7 @@ mod tests {
             next_probe_at: chrono::Utc::now(),
             exit_ip: None,
             password: None,
+            cipher: None,
             supports_tunnel: true,
             consecutive_failures: 2,
             score: 0.75,

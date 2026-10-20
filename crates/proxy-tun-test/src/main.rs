@@ -41,6 +41,7 @@ fn main() {
             next_probe_at: chrono::Utc::now(),
             exit_ip: None,
             password: None,
+            cipher: None,
             supports_tunnel: true,
             consecutive_failures: 0,
             score: 100.0,

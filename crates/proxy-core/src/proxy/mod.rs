@@ -42,6 +42,13 @@ pub struct ProxyInfo {
     /// cycle. Without this the batch size was the whole unverified pool, and
     /// it grew with every scrape.
     pub next_probe_at: chrono::DateTime<chrono::Utc>,
+    /// The cipher a Shadowsocks proxy wants.
+    ///
+    /// The name travels with the entry because it decides the key: the same
+    /// password under a different cipher is a different session, and a proxy
+    /// that wants one cipher and is given another does not open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cipher: Option<Box<str>>,
     /// The credential a protocol needs.
     ///
     /// Trojan and Shadowsocks authenticate with a password rather than a
@@ -108,6 +115,8 @@ pub enum ProxyProtocol {
     Socks5,
     /// Trojan: TLS to the server, then a password and a SOCKS5-style address.
     Trojan,
+    /// Shadowsocks: the AEAD version, the one the public lists carry.
+    Shadowsocks,
 }
 
 impl std::fmt::Display for ProxyProtocol {
@@ -124,6 +133,7 @@ impl ProxyProtocol {
             ProxyProtocol::Socks4 => "socks4",
             ProxyProtocol::Socks5 => "socks5",
             ProxyProtocol::Trojan => "trojan",
+            ProxyProtocol::Shadowsocks => "ss",
         }
     }
 }
@@ -140,6 +150,7 @@ impl std::str::FromStr for ProxyProtocol {
             "socks4" => Ok(ProxyProtocol::Socks4),
             "socks5" => Ok(ProxyProtocol::Socks5),
             "trojan" => Ok(ProxyProtocol::Trojan),
+            "shadowsocks" | "ss" => Ok(ProxyProtocol::Shadowsocks),
             other => Err(format!("unknown protocol: {other}")),
         }
     }
@@ -177,6 +188,7 @@ impl ProxyInfo {
             ProxyProtocol::Socks4 => "socks4",
             ProxyProtocol::Socks5 => "socks5",
             ProxyProtocol::Trojan => "trojan",
+            ProxyProtocol::Shadowsocks => "ss",
         };
         format!("{}://{}:{}", scheme, self.host, self.port)
     }

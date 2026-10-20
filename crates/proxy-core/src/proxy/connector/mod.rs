@@ -12,6 +12,7 @@ pub mod base;
 pub mod http;
 pub mod http_plain;
 pub mod https;
+pub mod shadowsocks;
 pub mod socks4;
 pub mod socks5;
 pub mod trojan;
@@ -104,6 +105,10 @@ impl ConnectorRegistry {
         registry.register(ProxyProtocol::Socks5, socks5::Socks5Connector);
         registry.register(ProxyProtocol::Socks4, socks4::Socks4Connector);
         registry.register(ProxyProtocol::Trojan, trojan::TrojanConnector::default());
+        registry.register(
+            ProxyProtocol::Shadowsocks,
+            shadowsocks::ShadowsocksConnector,
+        );
 
         registry
     }
