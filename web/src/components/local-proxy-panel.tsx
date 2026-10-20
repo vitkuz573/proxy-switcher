@@ -132,7 +132,7 @@ export function LocalProxyPanel({
             <>
               <p className="text-xs text-muted-foreground">{t("hint")}</p>
               <code className="block overflow-x-auto rounded-md bg-muted px-3 py-2 text-xs">
-                http://name:password@{state.address.replace("http://", "")}
+                http://name-session-1:password@{state.address.replace("http://", "")}
               </code>
               <dl className="grid gap-3 sm:grid-cols-4">
                 <Measure label={t("connections")} value={state.connections} />
@@ -306,7 +306,7 @@ export function LocalProxyPanel({
           </DialogHeader>
 
           <code className="block overflow-x-auto rounded-md bg-muted px-3 py-2 text-xs">
-            http://{created?.username}:{created?.password}@127.0.0.1:9098
+            http://{created?.username}-session-1:{created?.password}@127.0.0.1:9098
           </code>
 
           <DialogFooter>

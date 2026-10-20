@@ -700,6 +700,7 @@ impl ProxyPool {
     pub async fn best_matching(
         &self,
         avoid: &std::collections::HashSet<String>,
+        avoid_exits: &std::collections::HashSet<std::net::IpAddr>,
         policy: &crate::credentials::ProxyPolicy,
     ) -> Option<ProxyInfo> {
         let inner = self.inner.read().await;
@@ -723,6 +724,7 @@ impl ProxyPool {
             .filter(|p| {
                 !avoid.contains(&p.id)
                     && !avoid.contains(&format!("host:{}", p.host))
+                    && !p.exit_ip.is_some_and(|exit| avoid_exits.contains(&exit))
                     && p.last_success.is_some()
                     && p.consecutive_failures == 0
                     && p.supports_tunnel
@@ -948,6 +950,36 @@ mod tests {
             .expect("a working proxy");
 
         assert_eq!(next.id, "fresh");
+    }
+
+    #[tokio::test]
+    async fn a_session_is_held_apart_by_its_address() {
+        // Two entries of the pool are the same server under different names,
+        // and they leave from the same address. A session that is held apart
+        // by the entry alone would still share the address.
+        let pool = ProxyPool::new();
+
+        let mut first = working("a", 3.0, 0);
+        first.exit_ip = Some("198.51.100.7".parse().unwrap());
+        let mut second = working("b", 2.5, 0);
+        second.exit_ip = Some("198.51.100.7".parse().unwrap());
+        let mut third = working("c", 2.0, 0);
+        third.exit_ip = Some("198.51.100.8".parse().unwrap());
+
+        pool.restore(vec![first, second, third]).await;
+
+        let avoid: std::collections::HashSet<String> = ["a".to_string()].into_iter().collect();
+        let exits: std::collections::HashSet<std::net::IpAddr> =
+            ["198.51.100.7".parse::<std::net::IpAddr>().unwrap()]
+                .into_iter()
+                .collect();
+
+        let next = pool
+            .best_matching(&avoid, &exits, &crate::credentials::ProxyPolicy::default())
+            .await
+            .expect("a working proxy");
+
+        assert_eq!(next.id, "c", "the proxy with the same address is left out");
     }
 
     #[tokio::test]

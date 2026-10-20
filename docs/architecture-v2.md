@@ -297,12 +297,32 @@ It accepts `CONNECT host:port` for a tunnel and an absolute URI for an
 ordinary request. The API service serves the same port through its own, so
 the address a program is given can be either.
 
-### Credentials carry the policy
+### Credentials carry the policy, the name carries the session
 
 A client authenticates with a credential, and the credential carries a
 policy. One operator can hand out a credential that keeps a session on one
 exit address for a login, and another that changes the address on every
 request for a crawler, without either of them touching the engine.
+
+The name a client sends says which session it wants, the way the proxy
+services worth using have always done it: the name carries the parameters,
+separated by dashes, and the password stays the secret of the account.
+
+```text
+http://work-session-3:secret@127.0.0.1:9098
+```
+
+The credential is the longest known name the client's name starts with, and
+everything behind it is a parameter. So one credential carries as many
+sessions as its clients ask for, each with an address of its own, and the
+sessions expire on their own. A scraper that wants ten addresses at once
+asks for ten session names; a login that must not lose its address asks for
+one and keeps it.
+
+The sessions are held apart by the address the traffic leaves from, not by
+the entry in the pool: the same server is published under many names, and
+two sessions that share an address are one session as far as the site is
+concerned.
 
 A policy says:
 

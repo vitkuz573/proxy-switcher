@@ -482,7 +482,7 @@ proxy
       console.log();
       console.log(
         `  ${muted(t("proxy.status.hint"))}  ${bold(
-          `http://name:password@${state.address.replace("http://", "")}`,
+          `http://name-session-1:password@${state.address.replace("http://", "")}`,
         )}`,
       );
       console.log();
@@ -618,7 +618,7 @@ credentials
       const state = await cliCall(() => client().getLocalProxy());
       console.log(
         `  ${muted(t("credentials.create.hint"))}  ${bold(
-          `http://${credential.username}:${credential.password}@${state.address.replace("http://", "")}`,
+          `http://${credential.username}-session-1:${credential.password}@${state.address.replace("http://", "")}`,
         )}`,
       );
       console.log();

@@ -34,7 +34,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
-use crate::credentials::{CredentialStore, ProxyPolicy, ProxyPolicyRecord, Rotation};
+use crate::credentials::{
+    parse_client_name, ClientName, CredentialStore, ProxyPolicy, ProxyPolicyRecord, Rotation,
+};
 use crate::forwarder::{connect_to_host, Forwarder};
 use crate::pool::ProxyPool;
 use crate::proxy::connector::base::{Carriage, ConnectOptions, Target};
@@ -126,6 +128,18 @@ pub struct LocalProxyState {
 struct Session {
     /// The proxy this client is pinned to.
     proxy_id: String,
+    /// The address the traffic leaves from.
+    ///
+    /// Two entries of the pool are often the same server under different
+    /// names, and they leave from the same address. A session is held apart
+    /// by the address, not by the entry: a client that asks for two sessions
+    /// wants two addresses, not two names.
+    exit_ip: Option<std::net::IpAddr>,
+    /// The server the session is held on.
+    ///
+    /// The address is only known for the proxies that have been probed, so
+    /// the server is what keeps two sessions apart in the meantime.
+    host: String,
     /// When the pin runs out.
     expires_at: Option<Instant>,
 }
@@ -285,16 +299,21 @@ impl LocalProxy {
             }
         };
 
-        // The credential decides how the traffic is carried. The name in it
-        // tells the clients apart: every program on this host connects from
-        // the same address, so the address alone cannot.
+        // The name the client sends says which credential it belongs to and
+        // which session it wants. The session is what tells the clients
+        // apart: every program on this host connects from the same address,
+        // so the address alone cannot.
         let credentials = request.credentials();
-        let identity = credentials
-            .as_ref()
-            .map(|(username, _)| username.clone())
-            .unwrap_or_else(|| peer.clone());
+        let name = match credentials.as_ref() {
+            Some((username, _)) => self.client_name(username).await,
+            None => ClientName {
+                credential: peer.clone(),
+                parameters: Vec::new(),
+            },
+        };
+        let identity = name.session_key();
 
-        let policy = match self.policy_for(credentials.as_ref()).await {
+        let policy = match self.policy_for(&name, credentials.as_ref()).await {
             Some(policy) => policy,
             None => {
                 self.stats.refused.fetch_add(1, Ordering::Relaxed);
@@ -317,12 +336,23 @@ impl LocalProxy {
         }
 
         let proxy = self.proxy_for(&identity, &policy).await;
+        let sticky_secs = policy.settings.sticky_secs;
 
         match request.method.as_str() {
-            "CONNECT" => self.serve_tunnel(&mut client, &target, proxy).await,
-            _ => {
-                self.serve_request(&mut client, &request, &target, proxy)
+            "CONNECT" => {
+                self.serve_tunnel(&mut client, &target, proxy, &identity, sticky_secs)
                     .await
+            }
+            _ => {
+                self.serve_request(
+                    &mut client,
+                    &request,
+                    &target,
+                    proxy,
+                    &identity,
+                    sticky_secs,
+                )
+                .await
             }
         }
     }
@@ -330,9 +360,10 @@ impl LocalProxy {
     /// The policy a client's traffic is carried under.
     async fn policy_for(
         &self,
+        name: &ClientName,
         credentials: Option<&(String, String)>,
     ) -> Option<ProxyPolicyRecord> {
-        let Some((username, password)) = credentials else {
+        let Some((_, password)) = credentials else {
             if !self.config.allow_anonymous {
                 return None;
             }
@@ -344,13 +375,24 @@ impl LocalProxy {
         };
 
         let store = self.credentials.as_ref()?;
-        match store.verify(username, password).await {
+        match store.verify(&name.credential, password).await {
             Some(policy) => Some(policy),
             None => {
-                warn!("the local proxy refused the credential {username}");
+                warn!("the local proxy refused the credential {}", name.credential);
                 None
             }
         }
+    }
+
+    /// Read a client's name: the credential it belongs to, and the session it
+    /// asks for.
+    async fn client_name(&self, username: &str) -> ClientName {
+        let known = match self.credentials.as_ref() {
+            Some(store) => store.credential_names().await,
+            None => Vec::new(),
+        };
+
+        parse_client_name(username, &known)
     }
 
     /// Drop the proxy a client is pinned to.
@@ -411,6 +453,35 @@ impl LocalProxy {
         true
     }
 
+    /// Turn over every session a credential holds.
+    ///
+    /// A credential carries as many sessions as its clients ask for, and a
+    /// rotation that only touched one of them would leave the rest where
+    /// they were.
+    pub async fn rotate_credential(&self, credential: &str) -> usize {
+        let prefix = format!("{credential}:");
+        let mut sessions = self.sessions.lock().await;
+
+        let keys: Vec<String> = sessions
+            .keys()
+            .filter(|key| key.starts_with(&prefix))
+            .cloned()
+            .collect();
+
+        for key in &keys {
+            if let Some(session) = sessions.remove(key) {
+                self.avoided
+                    .lock()
+                    .await
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(session.proxy_id);
+            }
+        }
+
+        keys.len()
+    }
+
     /// The proxy a client's traffic is carried by.
     ///
     /// How it is chosen is the policy's decision: a sticky session keeps the
@@ -452,11 +523,24 @@ impl LocalProxy {
             .map(|session| session.proxy_id.clone())
             .collect();
 
+        // The addresses the other sessions leave from are left out as well,
+        // and so are the servers they are held on: the same server is
+        // published under many names, and two sessions on it are one session
+        // as far as the site is concerned.
+        let exits: HashSet<std::net::IpAddr> = sessions
+            .values()
+            .filter_map(|session| session.exit_ip)
+            .collect();
+
+        for session in sessions.values() {
+            pinned.insert(format!("host:{}", session.host));
+        }
+
         if let Some(avoided) = self.avoided.lock().await.remove(identity) {
             pinned.extend(avoided);
         }
 
-        let Some(proxy) = self.pool.best_matching(&pinned, policy).await else {
+        let Some(proxy) = self.pool.best_matching(&pinned, &exits, policy).await else {
             return self.pool.active().await.filter(|p| policy.allows(p));
         };
 
@@ -478,6 +562,8 @@ impl LocalProxy {
             identity.to_string(),
             Session {
                 proxy_id: proxy.id.clone(),
+                exit_ip: proxy.exit_ip,
+                host: proxy.host.clone(),
                 expires_at,
             },
         );
@@ -513,7 +599,11 @@ impl LocalProxy {
             avoid.extend(dropped);
         }
 
-        let Some(proxy) = self.pool.best_matching(&avoid, policy).await else {
+        let Some(proxy) = self
+            .pool
+            .best_matching(&avoid, &HashSet::new(), policy)
+            .await
+        else {
             return self.pool.active().await.filter(|p| policy.allows(p));
         };
 
@@ -532,7 +622,11 @@ impl LocalProxy {
     /// A proxy of this request's own.
     async fn per_request_proxy(&self, policy: &ProxyPolicy) -> Option<ProxyInfo> {
         let avoid = self.recently_used().await;
-        let Some(proxy) = self.pool.best_matching(&avoid, policy).await else {
+        let Some(proxy) = self
+            .pool
+            .best_matching(&avoid, &HashSet::new(), policy)
+            .await
+        else {
             return self.pool.active().await.filter(|p| policy.allows(p));
         };
 
@@ -563,6 +657,8 @@ impl LocalProxy {
         client: &mut tokio::net::TcpStream,
         target: &Target,
         proxy: Option<ProxyInfo>,
+        identity: &str,
+        sticky_secs: u64,
     ) -> Result<()> {
         let Some(proxy) = proxy else {
             return self
@@ -575,8 +671,8 @@ impl LocalProxy {
                 .await;
         };
 
-        let upstream = match self.open_tunnel(target, proxy).await {
-            Ok(upstream) => upstream,
+        let (upstream, carried) = match self.open_tunnel(target, proxy).await {
+            Ok(opened) => opened,
             Err(e) => {
                 return self
                     .refuse(
@@ -588,6 +684,11 @@ impl LocalProxy {
                     .await;
             }
         };
+
+        // The session is pinned to the proxy that carried the connection: the
+        // one that was chosen first may have died on the way, and a session
+        // that keeps a dead proxy keeps failing.
+        self.pin_session(identity, &carried, sticky_secs).await;
 
         client
             .write_all(
@@ -609,6 +710,8 @@ impl LocalProxy {
         request: &RequestHead,
         target: &Target,
         proxy: Option<ProxyInfo>,
+        identity: &str,
+        sticky_secs: u64,
     ) -> Result<()> {
         let Some(proxy) = proxy else {
             return self
@@ -624,7 +727,8 @@ impl LocalProxy {
         // The proxy is asked for a tunnel when it can carry one.
         if proxy.supports_tunnel {
             match self.open_tunnel(target, proxy.clone()).await {
-                Ok(mut upstream) => {
+                Ok((mut upstream, carried)) => {
+                    self.pin_session(identity, &carried, sticky_secs).await;
                     upstream.write_all(&request.raw).await?;
                     upstream.flush().await?;
                     self.stats.tunnels.fetch_add(1, Ordering::Relaxed);
@@ -745,7 +849,14 @@ impl LocalProxy {
     }
 
     /// Open a tunnel through a proxy, moving on when the proxy is dead.
-    async fn open_tunnel(&self, target: &Target, proxy: ProxyInfo) -> Result<BoxedStream> {
+    ///
+    /// The proxy that carried the connection is returned with it: the one
+    /// that was chosen first may have died on the way.
+    async fn open_tunnel(
+        &self,
+        target: &Target,
+        proxy: ProxyInfo,
+    ) -> Result<(BoxedStream, ProxyInfo)> {
         let mut avoided: HashSet<String> = HashSet::new();
         let mut last_error: Option<anyhow::Error> = None;
         let mut current = proxy;
@@ -762,7 +873,7 @@ impl LocalProxy {
                 .connect_to_with(&current, target, &options)
                 .await
             {
-                Ok(stream) => return Ok(stream),
+                Ok(stream) => return Ok((stream, current.clone())),
                 Err(e) => {
                     warn!(
                         "the proxy {} could not carry the connection: {e}",
@@ -808,6 +919,30 @@ impl LocalProxy {
         let addrs = crate::net::resolve_host_port(&proxy.host, proxy.port).await?;
         let stream = crate::net::connect_first(&addrs, options.mark).await?;
         Ok(Box::new(stream))
+    }
+
+    /// Remember which proxy is carrying a session.
+    ///
+    /// The session is written down again even when it is gone: a failure
+    /// releases the session of the proxy that failed, and the proxy that
+    /// took over is the one the session belongs to now.
+    async fn pin_session(&self, identity: &str, proxy: &ProxyInfo, sticky_secs: u64) {
+        let expires_at = if sticky_secs > 0 {
+            Some(Instant::now() + Duration::from_secs(sticky_secs))
+        } else {
+            None
+        };
+
+        let mut sessions = self.sessions.lock().await;
+        sessions.insert(
+            identity.to_string(),
+            Session {
+                proxy_id: proxy.id.clone(),
+                exit_ip: proxy.exit_ip,
+                host: proxy.host.clone(),
+                expires_at,
+            },
+        );
     }
 
     /// Record a failure against the proxy.

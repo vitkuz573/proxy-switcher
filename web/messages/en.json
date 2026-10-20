@@ -227,5 +227,13 @@
     "rotate": "Turn the session over",
     "rotated": "The session of {name} was turned over.",
     "rotateNothing": "The session of {name} had already run out."
+  },
+  "proxy": {
+    "hint": "Point a program at this address with a credential. The name carries the session:",
+    "sessionHint": "One credential carries as many sessions as you ask for: work-session-1, work-session-2. Each has an address of its own."
+  },
+  "credentials": {
+    "create": "Create a credential",
+    "hint": "Point a program at"
   }
 }

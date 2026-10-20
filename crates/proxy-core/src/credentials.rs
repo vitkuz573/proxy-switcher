@@ -175,6 +175,13 @@ pub struct ProxyCredential {
 /// every request is not.
 pub struct CredentialStore {
     storage: tokio::sync::Mutex<crate::storage::Storage>,
+    /// The names of the credentials, kept for a short while.
+    ///
+    /// A client's name is read on every connection, and the names are
+    /// needed to tell the credential from the parameters behind it. The list
+    /// changes rarely, so it is kept for a minute rather than read again for
+    /// every connection.
+    names: tokio::sync::RwLock<(Vec<String>, std::time::Instant)>,
 }
 
 impl CredentialStore {
@@ -182,6 +189,7 @@ impl CredentialStore {
     pub fn open(path: &std::path::Path) -> anyhow::Result<Self> {
         Ok(Self {
             storage: tokio::sync::Mutex::new(crate::storage::Storage::open(path)?),
+            names: tokio::sync::RwLock::new((Vec::new(), std::time::Instant::now())),
         })
     }
 
@@ -220,6 +228,30 @@ impl CredentialStore {
         storage.delete_policy(name)
     }
 
+    /// The names of the credentials.
+    ///
+    /// The list is kept for a minute: a client's name is read on every
+    /// connection, and the names are needed to tell the credential from the
+    /// parameters behind it.
+    pub async fn credential_names(&self) -> Vec<String> {
+        {
+            let cached = self.names.read().await;
+            // An empty list means the names have not been read yet.
+            if !cached.0.is_empty() && cached.1.elapsed() < std::time::Duration::from_secs(60) {
+                return cached.0.clone();
+            }
+        }
+
+        let names: Vec<String> = self
+            .list_credentials()
+            .await
+            .map(|credentials| credentials.into_iter().map(|c| c.username).collect())
+            .unwrap_or_default();
+
+        *self.names.write().await = (names.clone(), std::time::Instant::now());
+        names
+    }
+
     /// Every credential, without its secret.
     pub async fn list_credentials(&self) -> anyhow::Result<Vec<ProxyCredential>> {
         let storage = self.storage.lock().await;
@@ -250,6 +282,12 @@ impl CredentialStore {
 
         let storage = self.storage.lock().await;
         storage.save_credential(&credential, &salt, &hash)?;
+        drop(storage);
+
+        // The name of a new credential has to be known at once: a client
+        // that authenticates with it must not be refused while the list of
+        // the names is still the old one.
+        self.forget_names().await;
 
         Ok(credential)
     }
@@ -257,13 +295,143 @@ impl CredentialStore {
     /// Remove a credential.
     pub async fn delete_credential(&self, username: &str) -> anyhow::Result<bool> {
         let storage = self.storage.lock().await;
-        storage.delete_credential(username)
+        let removed = storage.delete_credential(username);
+        drop(storage);
+
+        self.forget_names().await;
+
+        removed
+    }
+
+    /// Forget the list of the names, so it is read again.
+    async fn forget_names(&self) {
+        *self.names.write().await = (Vec::new(), std::time::Instant::now());
     }
 
     /// The policy a credential carries, when the password is right.
     pub async fn verify(&self, username: &str, password: &str) -> Option<ProxyPolicyRecord> {
         let storage = self.storage.lock().await;
         storage.verify_credential(username, password).ok().flatten()
+    }
+}
+
+/// What a client calls itself, and what else the name carries.
+///
+/// The name a proxy client sends is not only the name of the credential: it
+/// also says which session the client wants. This is how the proxy services
+/// that are worth using have always done it — the name carries the
+/// parameters, separated by dashes, and the password stays the secret of the
+/// account:
+///
+/// ```text
+/// http://work-session-3:secret@127.0.0.1:9098   a third session of "work"
+/// http://work-session-4:secret@127.0.0.1:9098   a fourth, with another address
+/// ```
+///
+/// One credential therefore carries as many sessions as the client asks for,
+/// each with an address of its own, and the sessions expire on their own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientName {
+    /// The credential the name belongs to.
+    pub credential: String,
+    /// The parameters the name carries, as they were written.
+    pub parameters: Vec<(String, String)>,
+}
+
+impl ClientName {
+    /// The value of a parameter, if the name carries it.
+    pub fn parameter(&self, key: &str) -> Option<&str> {
+        self.parameters
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(key))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// The session the client asked for.
+    ///
+    /// A client that asks for nothing is one session of its own.
+    pub fn session(&self) -> &str {
+        self.parameter("session").unwrap_or("default")
+    }
+
+    /// The key the session is held under.
+    ///
+    /// The credential is part of it: two credentials that ask for the same
+    /// session name are still two accounts, and their traffic is held apart.
+    pub fn session_key(&self) -> String {
+        format!("{}:{}", self.credential, self.session())
+    }
+}
+
+/// The parameters a client's name may carry.
+pub const PARAMETER_KEYS: [&str; 4] = ["session", "country", "protocol", "sticky"];
+
+/// Read the parameters out of the tail of a client's name.
+///
+/// The parameters come in pairs, the key and the value separated by a dash:
+/// `session-3`, `country-de`. A value may carry a dash of its own, so a part
+/// that is not a key belongs to the value before it.
+fn parse_parameters(rest: &str) -> Vec<(String, String)> {
+    let mut parameters: Vec<(String, String)> = Vec::new();
+    let mut current: Option<String> = None;
+
+    for part in rest.split('-').filter(|part| !part.is_empty()) {
+        // A part that names a parameter starts a new one. The value of the
+        // parameter before it is finished.
+        if PARAMETER_KEYS
+            .iter()
+            .any(|key| key.eq_ignore_ascii_case(part))
+        {
+            if let Some(key) = current.take() {
+                parameters.push((key, String::new()));
+            }
+            current = Some(part.to_string());
+            continue;
+        }
+
+        match current.take() {
+            Some(key) => parameters.push((key, part.to_string())),
+            None => parameters.push(("session".to_string(), part.to_string())),
+        }
+    }
+
+    if let Some(key) = current.take() {
+        parameters.push((key, String::new()));
+    }
+
+    parameters
+}
+
+/// Read a client's name: the credential it belongs to, and what else it says.
+///
+/// The credential is the longest known name the client's name starts with.
+/// A name that matches nothing is taken as it stands, so the check that
+/// follows can say so in one place.
+pub fn parse_client_name(username: &str, known: &[String]) -> ClientName {
+    let name = username.trim();
+
+    let credential = known
+        .iter()
+        .filter(|candidate| {
+            name == candidate.as_str()
+                || (name.len() > candidate.len()
+                    && name.starts_with(candidate.as_str())
+                    && name.as_bytes()[candidate.len()] == b'-')
+        })
+        .max_by_key(|candidate| candidate.len())
+        .cloned()
+        .unwrap_or_else(|| name.to_string());
+
+    let rest = name
+        .strip_prefix(credential.as_str())
+        .unwrap_or_default()
+        .trim_start_matches('-');
+
+    let parameters = parse_parameters(rest);
+
+    ClientName {
+        credential,
+        parameters,
     }
 }
 
@@ -394,6 +562,43 @@ mod tests {
         assert!(verify(&salt, &password, &stored));
         assert!(!verify(&salt, "another", &stored));
         assert!(!verify(&generate_salt(), &password, &stored));
+    }
+
+    #[test]
+    fn a_client_name_carries_its_session() {
+        let known = vec!["work".to_string(), "work-session-1".to_string()];
+        let name = parse_client_name("work-session-3", &known);
+
+        assert_eq!(name.credential, "work");
+        assert_eq!(name.session(), "3");
+        assert_eq!(name.session_key(), "work:3");
+    }
+
+    #[test]
+    fn the_longest_known_name_wins() {
+        // Two credentials where one is the prefix of the other.
+        let known = vec!["work".to_string(), "work-eu".to_string()];
+        let name = parse_client_name("work-eu-session-2", &known);
+
+        assert_eq!(name.credential, "work-eu");
+        assert_eq!(name.session(), "2");
+    }
+
+    #[test]
+    fn a_client_without_a_session_has_the_default_one() {
+        let known = vec!["work".to_string()];
+        let name = parse_client_name("work", &known);
+
+        assert_eq!(name.credential, "work");
+        assert_eq!(name.session(), "default");
+    }
+
+    #[test]
+    fn a_name_that_matches_nothing_is_taken_as_it_stands() {
+        let known = vec!["work".to_string()];
+        let name = parse_client_name("stranger", &known);
+
+        assert_eq!(name.credential, "stranger");
     }
 
     #[test]

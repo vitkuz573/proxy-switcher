@@ -284,6 +284,8 @@ export const CredentialRotationSchema = Type.Object(
     policy: Type.String(),
     /** Whether anything was actually held. */
     rotated: Type.Boolean(),
+    /** How many sessions were turned over. */
+    sessions: Type.Integer(),
     /** The proxy in front now. */
     current_proxy: Type.Union([Type.String(), Type.Null()]),
   },

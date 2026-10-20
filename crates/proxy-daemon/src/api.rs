@@ -730,9 +730,30 @@ async fn rotate_credential(
         )));
     };
 
-    // The pin the client holds is dropped, and so is the proxy in front for
-    // the policy, when the policy shares one between its clients.
-    let session = state.local_proxy.rotate_session(&username).await;
+    // The name may name a session as well as the credential. A session that
+    // is named is turned over on its own; a name without one turns over
+    // every session the credential holds.
+    let known: Vec<String> = store
+        .list_credentials()
+        .await
+        .map_err(|e| ApiError::internal(format!("could not read the credentials: {e}")))?
+        .into_iter()
+        .map(|credential| credential.username)
+        .collect();
+
+    let name = proxy_core::credentials::parse_client_name(&username, &known);
+    let named_session = name.parameter("session").is_some();
+
+    let (rotated, sessions) = if named_session {
+        let session = state.local_proxy.rotate_session(&name.session_key()).await;
+        (session, 1)
+    } else {
+        let count = state.local_proxy.rotate_credential(&name.credential).await;
+        (count > 0, count)
+    };
+
+    // The proxy in front of the policy is turned over as well, when the
+    // policy shares one between its clients.
     let policy = state.local_proxy.rotate_policy(&credential.policy).await;
 
     let current = state.local_proxy.state().await.current_proxy;
@@ -740,7 +761,8 @@ async fn rotate_credential(
     Ok(Json(Rotation {
         username,
         policy: credential.policy,
-        rotated: session || policy,
+        rotated: rotated || policy,
+        sessions,
         current_proxy: current,
     }))
 }
@@ -755,6 +777,8 @@ struct Rotation {
     /// Whether anything was actually held: a session that had already run
     /// out rotates nothing.
     rotated: bool,
+    /// How many sessions were turned over.
+    sessions: usize,
     /// The proxy in front now.
     current_proxy: Option<String>,
 }
