@@ -373,6 +373,14 @@ export function spinner(text: string): {
 }
 
 /** A progress bar. */
+/** Bytes in the unit a reader can picture. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} kB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+}
+
 export function bar(done: number, total: number, size = 24): string {
   if (total <= 0) {
     return muted("─".repeat(size));

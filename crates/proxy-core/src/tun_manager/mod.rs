@@ -8,11 +8,14 @@ use tracing::{info, warn};
 
 use std::io::Write;
 
+#[derive(Clone)]
 pub struct TunManager {
     config: crate::config::TunConfig,
     dev: Arc<Mutex<Option<tun::Device>>>,
     /// Set during shutdown so the blocking forwarding loop can return.
     shutdown: Arc<AtomicBool>,
+    /// The routes the policy put into the routing table.
+    installed_routes: Arc<tokio::sync::Mutex<Vec<String>>>,
 }
 
 fn parse_ipv4(addr: &str) -> Result<(u8, u8, u8, u8)> {
@@ -31,6 +34,7 @@ impl TunManager {
             config,
             dev: Arc::new(Mutex::new(None)),
             shutdown: Arc::new(AtomicBool::new(false)),
+            installed_routes: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -270,6 +274,66 @@ impl TunManager {
         Ok(())
     }
 
+    /// Point the destinations of the policy at this device.
+    ///
+    /// The device is not the default route: only the destinations the policy
+    /// names are sent into it. Everything else, including the daemon's own
+    /// traffic, keeps the route it had. A proxy that carries one destination
+    /// is a tool; a proxy that carries everything is a single point of failure
+    /// for the whole host.
+    ///
+    /// The routes are placed in the main table, where they are more specific
+    /// than the default route and therefore win.
+    pub async fn sync_policy_routes(&self, destinations: &[String]) -> Result<Vec<String>> {
+        let mut wanted: Vec<String> = Vec::new();
+
+        for destination in destinations {
+            // A route that is already there is replaced, so a change of
+            // address does not leave the old one behind.
+            let output = tokio::process::Command::new("ip")
+                .args(["route", "replace", destination, "dev", &self.config.name])
+                .output()
+                .await
+                .context("Failed to add a policy route")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !stderr.contains("File exists") {
+                    warn!("could not route {destination} into the device: {stderr}");
+                    continue;
+                }
+            }
+
+            wanted.push(destination.clone());
+        }
+
+        // The routes that are no longer wanted are removed, so the policy
+        // stays true to itself.
+        let installed = self.installed_routes.lock().await.clone();
+        for stale in installed {
+            if wanted.contains(&stale) {
+                continue;
+            }
+            let _ = tokio::process::Command::new("ip")
+                .args(["route", "del", &stale, "dev", &self.config.name])
+                .output()
+                .await;
+        }
+
+        *self.installed_routes.lock().await = wanted.clone();
+        Ok(wanted)
+    }
+
+    /// Take the routes back out of the routing table.
+    pub async fn clear_policy_routes(&self) {
+        for route in self.installed_routes.lock().await.drain(..) {
+            let _ = tokio::process::Command::new("ip")
+                .args(["route", "del", &route, "dev", &self.config.name])
+                .output()
+                .await;
+        }
+    }
+
     /// Remove the fwmark routing rule and table.
     pub async fn cleanup_fwmark(table: u32, mark: u32) {
         let _ = tokio::process::Command::new("ip")
@@ -334,6 +398,12 @@ pub async fn run_forwarding_loop(
     info!("Starting TUN forwarding loop (MTU={mtu})");
     let handle = tokio::runtime::Handle::current();
 
+    // The router opens its tunnels in the background, so the answer to a
+    // handshake can arrive when the loop is doing something else. The device
+    // belongs to the loop, so the answers come back through a channel.
+    let (responder, mut answers) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    router.set_responder(responder).await;
+
     let result = tokio::task::spawn_blocking(move || {
         use std::io::{ErrorKind, Read, Write};
         let mut buf = vec![0u8; mtu];
@@ -390,6 +460,13 @@ pub async fn run_forwarding_loop(
                 Err(_e) => {
                     // Non-IPv4 packets (ARP, IPv6, etc.) are silently ignored
                 }
+            }
+
+            // The answers to the handshakes the router opened in the
+            // background. They are written here, because the device belongs
+            // to this thread.
+            while let Ok(pkt) = answers.try_recv() {
+                let _ = dev.write_all(&pkt);
             }
 
             // Non-blocking pump: TCP responses

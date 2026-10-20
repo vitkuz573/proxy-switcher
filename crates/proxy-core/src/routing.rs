@@ -108,6 +108,11 @@ impl RoutePolicy {
         }
     }
 
+    /// True when the destination is one that never goes through a proxy.
+    pub fn matches_always_direct(&self, ip: IpAddr, port: u16) -> bool {
+        self.matches_any(ip, port, &self.always_direct)
+    }
+
     /// True when the destination matches one of the given rules.
     fn matches_any(&self, ip: IpAddr, port: u16, cidrs: &[String]) -> bool {
         if !self.ports.is_empty() && !self.ports.contains(&port) {

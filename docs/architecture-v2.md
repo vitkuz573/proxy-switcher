@@ -232,6 +232,40 @@ Local addresses never go through a proxy whatever the mode says, and neither
 does the proxy itself — a connection to the proxy that is routed through a
 proxy is a loop.
 
+### The policy puts routes in the routing table
+
+The device is not the default route. The engine resolves the names the policy
+lists, and points those destinations at the device with routes that are more
+specific than the default route and therefore win. Everything else — the rest
+of the host, and the daemon's own traffic — keeps the route it had.
+
+That is what makes the policy real rather than advisory. A connection that
+arrives at the device was put there on purpose, and the router proxies it
+whether or not it ever learned the name behind the address. The names the
+engine resolved are kept in its resolver cache, which is also what a plain
+HTTP request needs for its `Host` header.
+
+The routes are refreshed as the names behind the policy change, and the ones
+that are no longer wanted are taken out again, so the policy stays true to
+itself.
+
+### A dead proxy does not take the traffic with it
+
+A public proxy dies without warning, and the destinations the policy covers
+have nowhere else to go: letting them out direct would undo the policy
+silently. When a connection cannot be carried, the engine records the failure
+against the proxy, steps it aside, and tries the next one — up to three
+proxies before the connection is refused. The refusal is deliberate: the
+client fails at once instead of waiting, and the operator sees that the
+traffic was not proxied.
+
+The score of a proxy is aged by how long ago it was checked. A public proxy
+that was fast half an hour ago is very likely dead, and a fresh confirmation
+is worth more than an old one.
+
+The active proxy is remembered, so a restart does not leave the policy
+pointing at nothing.
+
 ### Keeping the daemon out of its own device
 
 The daemon creates a TUN device and can point the default route at it. Its own

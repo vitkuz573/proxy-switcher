@@ -132,6 +132,12 @@ pub struct AppState {
     pub min_score: f64,
     /// Which traffic a proxy applies to.
     pub route_policy: RoutePolicy,
+    /// How many destinations the policy covers.
+    pub policy_destinations: Arc<std::sync::atomic::AtomicUsize>,
+    /// How many routes are in the routing table.
+    pub policy_routes: Arc<std::sync::atomic::AtomicUsize>,
+    /// The active proxy the operator chose, kept while the pool catches up.
+    pub remembered_active: Arc<tokio::sync::RwLock<Option<String>>>,
     /// The firewall mark the daemon's own traffic carries.
     pub bypass_mark: u32,
     /// Whether the default route points at the TUN device.
@@ -163,6 +169,10 @@ struct RoutingInfo {
     default_route: bool,
     /// The address of the active proxy, if one is selected.
     active_proxy: Option<String>,
+    /// The destinations the policy is routing into the device.
+    destinations: usize,
+    /// The routes that are in the routing table.
+    routes: usize,
 }
 
 #[derive(Serialize)]
@@ -330,6 +340,12 @@ async fn get_routing(State(state): State<AppState>) -> Json<RoutingInfo> {
         bypass_mark: state.bypass_mark,
         default_route: state.default_route,
         active_proxy: state.pool.active().await.map(|p| p.id),
+        destinations: state
+            .policy_destinations
+            .load(std::sync::atomic::Ordering::Relaxed),
+        routes: state
+            .policy_routes
+            .load(std::sync::atomic::Ordering::Relaxed),
     })
 }
 
@@ -358,9 +374,14 @@ async fn get_statistics(State(state): State<AppState>) -> Json<serde_json::Value
 }
 
 async fn get_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
+    // The live counts come from the router. They used to be written down as
+    // zero, which made a working device look like an idle one.
     Json(serde_json::json!({
-        "tcp_connections": 0,
-        "udp_flows": 0,
+        "tcp_connections": state.router.active_tcp_conns().await,
+        "udp_flows": state.router.active_udp_flows().await,
+        "tcp_connections_total": state.router.tunnels_opened(),
+        "bytes_sent": state.router.bytes_out(),
+        "bytes_received": state.router.bytes_in(),
         "dns_cache_size": state.router.dns_cache_entries().await.len(),
         "healthy_count": state.pool.healthy_count().await,
         "pool_size": state.pool.len().await,
@@ -519,26 +540,58 @@ async fn put_active(
     State(state): State<AppState>,
     Query(q): Query<PutActiveProxy>,
 ) -> Result<Json<ProxyInfo>, ApiError> {
-    state
+    let chosen = state
         .pool
         .set_active(&q.proxy_id)
         .await
-        .map(Json)
-        .ok_or_else(|| ApiError::not_found(format!("No proxy with id {}", q.proxy_id)))
+        .ok_or_else(|| ApiError::not_found(format!("No proxy with id {}", q.proxy_id)))?;
+
+    // The choice is remembered, so a restart does not leave the routing
+    // policy pointing at nothing.
+    remember_active(&state, Some(&chosen.id)).await;
+
+    Ok(Json(chosen))
 }
 
 async fn clear_active(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
     state.pool.clear_active().await;
+    remember_active(&state, None).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn rotate(State(state): State<AppState>) -> Result<Json<ProxyInfo>, ApiError> {
-    state
+    let next = state
         .pool
         .rotate()
         .await
-        .map(Json)
-        .ok_or_else(|| ApiError::conflict("The pool is empty"))
+        .ok_or_else(|| ApiError::conflict("The pool is empty"))?;
+
+    remember_active(&state, Some(&next.id)).await;
+
+    Ok(Json(next))
+}
+
+/// Write the active proxy down, so it survives a restart.
+async fn remember_active(state: &AppState, id: Option<&str>) {
+    let Some(path) = state.db_path.as_ref() else {
+        return;
+    };
+
+    let written = match id {
+        Some(id) => proxy_core::storage::Storage::open(path)
+            .and_then(|s| s.save_setting("active_proxy", id)),
+        None => proxy_core::storage::Storage::open(path)
+            .and_then(|s| s.save_setting("active_proxy", "")),
+    };
+
+    // The memory keeps the choice while the pool catches up with it.
+    let remembered = state.remembered_active.clone();
+    let remembered_value = id.map(|id| id.to_string());
+    *remembered.write().await = remembered_value;
+
+    if let Err(e) = written {
+        tracing::warn!("could not remember the active proxy: {e}");
+    }
 }
 
 /* ── Sources ───────────────────────────────────────────────────────────── */

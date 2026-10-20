@@ -64,6 +64,15 @@ impl DnsCache {
         self.inner.read().await.get(&u32::from(ip)).cloned()
     }
 
+    /// Forget a name.
+    ///
+    /// The cache holds names for addresses that are no longer routed, and a
+    /// name that no longer applies is worse than no name at all: it makes a
+    /// connection look like something it is not.
+    pub async fn remove(&self, ip: Ipv4Addr) {
+        self.inner.write().await.remove(&u32::from(ip));
+    }
+
     pub async fn entries(&self) -> Vec<(Ipv4Addr, String)> {
         self.inner
             .read()

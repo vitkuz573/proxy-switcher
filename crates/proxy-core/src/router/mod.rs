@@ -22,6 +22,33 @@ pub struct Router {
     policy: RoutePolicy,
     /// Opens the connections the router forwards.
     forwarder: Forwarder,
+    /// The addresses the engine pointed at the device.
+    ///
+    /// The device is not the default route: the engine routes the policy's
+    /// destinations into it and nothing else. An address that arrives here
+    /// was put here on purpose, and the policy is the reason for it.
+    routed: Arc<tokio::sync::RwLock<std::collections::HashSet<std::net::Ipv4Addr>>>,
+    /// Where the response packets go.
+    ///
+    /// The tunnel is opened in the background, so the answer to a handshake
+    /// can arrive after the loop has moved on. The device belongs to the
+    /// loop, so the packets are handed to it through a channel.
+    responder: Arc<tokio::sync::RwLock<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>,
+    /// The tunnels the router has opened since it started.
+    ///
+    /// The live count says what is open right now, which is usually nothing:
+    /// a request goes through in a fraction of a second. The total says how
+    /// much the device has carried, which is the number an operator wants.
+    tunnels_opened: Arc<std::sync::atomic::AtomicU64>,
+    /// The bytes carried towards the destination.
+    bytes_out: Arc<std::sync::atomic::AtomicU64>,
+    /// The bytes carried back to the client.
+    bytes_in: Arc<std::sync::atomic::AtomicU64>,
+    /// The flows whose tunnel is being opened.
+    ///
+    /// A client that retransmits its handshake must not open a second
+    /// tunnel: the first one is still on its way.
+    pending: Arc<tokio::sync::Mutex<std::collections::HashSet<FlowKey>>>,
     /// Firewall mark for the sockets the router opens.
     ///
     /// The router's own connection to the proxy must not re-enter the TUN: a
@@ -39,6 +66,14 @@ impl Router {
             dns_cache: Arc::new(DnsCache::new()),
             forwarder: Forwarder::new(),
             policy: RoutePolicy::default(),
+            routed: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+            responder: Arc::new(tokio::sync::RwLock::new(
+                tokio::sync::mpsc::unbounded_channel().0,
+            )),
+            pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+            tunnels_opened: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            bytes_out: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            bytes_in: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             mark: None,
         }
     }
@@ -52,6 +87,14 @@ impl Router {
             dns_cache: Arc::new(DnsCache::new()),
             forwarder: Forwarder::new(),
             policy,
+            routed: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+            responder: Arc::new(tokio::sync::RwLock::new(
+                tokio::sync::mpsc::unbounded_channel().0,
+            )),
+            pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+            tunnels_opened: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            bytes_out: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            bytes_in: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             mark,
         }
     }
@@ -68,6 +111,14 @@ impl Router {
             dns_cache,
             forwarder: Forwarder::new(),
             policy: RoutePolicy::default(),
+            routed: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+            responder: Arc::new(tokio::sync::RwLock::new(
+                tokio::sync::mpsc::unbounded_channel().0,
+            )),
+            pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+            tunnels_opened: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            bytes_out: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            bytes_in: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             mark: None,
         }
     }
@@ -80,6 +131,14 @@ impl Router {
             dns_cache: Arc::new(DnsCache::new()),
             forwarder: Forwarder::new(),
             policy: RoutePolicy::default(),
+            routed: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+            responder: Arc::new(tokio::sync::RwLock::new(
+                tokio::sync::mpsc::unbounded_channel().0,
+            )),
+            pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+            tunnels_opened: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            bytes_out: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            bytes_in: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             mark: Some(fwmark),
         }
     }
@@ -92,10 +151,59 @@ impl Router {
         &self.udp_tracker
     }
 
+    /// Tell the router which addresses the engine routed into the device.
+    ///
+    /// The set is the truth about what the device is carrying: an address
+    /// that arrives here is one the policy covers, whether or not the router
+    /// happens to know the name behind it.
+    pub async fn set_routed_destinations(
+        &self,
+        addresses: std::collections::HashSet<std::net::Ipv4Addr>,
+    ) {
+        *self.routed.write().await = addresses;
+    }
+
+    /// Hand the response packets to the loop that owns the device.
+    pub async fn set_responder(&self, sender: tokio::sync::mpsc::UnboundedSender<Vec<u8>>) {
+        *self.responder.write().await = sender;
+    }
+
+    /// Send a response packet to the loop that owns the device.
+    async fn respond(&self, packet: Vec<u8>) {
+        let sender = self.responder.read().await.clone();
+        let _ = sender.send(packet);
+    }
+
+    /// How many tunnels the router has opened since it started.
+    pub fn tunnels_opened(&self) -> u64 {
+        self.tunnels_opened
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How many bytes the router carried towards the destination.
+    pub fn bytes_out(&self) -> u64 {
+        self.bytes_out.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How many bytes the router carried back to the client.
+    pub fn bytes_in(&self) -> u64 {
+        self.bytes_in.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How many addresses the engine routed into the device.
+    pub async fn routed_destination_count(&self) -> usize {
+        self.routed.read().await.len()
+    }
+
     // ── TCP ────────────────────────────────────────────────────────────
 
     /// Handle a SYN packet: open proxy tunnel, store TCP state, return SYN-ACK.
-    pub async fn handle_outgoing(&self, packet: &ParsedPacket) -> Option<Vec<u8>> {
+    ///
+    /// The tunnel is opened in the background. A proxy that does not answer
+    /// would otherwise hold the whole device still — every other connection
+    /// would wait for it — and a dead proxy is the normal case, not the
+    /// exception. The handshake's answer travels back through the responder.
+    pub async fn handle_outgoing(self: &Arc<Self>, packet: &ParsedPacket) -> Option<Vec<u8>> {
         if !packet.is_tcp_syn() {
             return None;
         }
@@ -126,6 +234,17 @@ impl Router {
             ));
         }
 
+        // A handshake that is already on its way must not start a second
+        // tunnel: the client retransmits until it is answered, and every
+        // retransmission would open another connection to the proxy.
+        {
+            let mut pending = self.pending.lock().await;
+            if !pending.insert(key.clone()) {
+                debug!("Handshake already in flight for {:?}", key);
+                return None;
+            }
+        }
+
         // Use hostname from DNS cache if available, fall back to IP
         let target_host = self
             .dns_cache
@@ -136,23 +255,40 @@ impl Router {
         // Which traffic a proxy applies to. The default routes nothing, so a
         // proxy is an opt-in for specific destinations rather than a default
         // route for the whole host.
-        let decision = self.policy.decide(
-            IpAddr::V4(key.dst_ip),
-            key.dst_port,
-            Some(target_host.as_str()),
-        );
+        let decision = self
+            .decide(key.dst_ip, key.dst_port, Some(target_host.as_str()))
+            .await;
 
         // The proxy's own address is never routed through the proxy.
-        let proxy = match decision {
+        //
+        // It is replaced when the proxy turns out to be dead and another one
+        // takes over.
+        let mut proxy = match decision {
             Decision::Direct => None,
             Decision::Proxy => self.pool.active().await,
         };
 
         if decision == Decision::Proxy && proxy.is_none() {
-            // No proxy is available. Going direct is better than dropping the
-            // connection: the whole point of scoping the policy is that the
-            // rest of the host keeps working.
-            warn!("No active proxy for {target_host}, going direct");
+            // The policy says this traffic goes through a proxy and there is
+            // none to send it to. Letting it out direct would undo the
+            // policy silently, and the operator would never learn that their
+            // traffic was not protected. The connection is refused instead:
+            // the destinations the policy covers fail, and the rest of the
+            // host is untouched.
+            warn!("No active proxy for {target_host}, refusing the connection");
+            self.pending.lock().await.remove(&key);
+            self.respond(build_tcp_packet(
+                ip.destination,
+                ip.source,
+                tcp.destination_port,
+                tcp.source_port,
+                0,
+                tcp.sequence_number.wrapping_add(1),
+                0x14,
+                &[],
+            ))
+            .await;
+            return None;
         }
 
         debug!(
@@ -160,47 +296,168 @@ impl Router {
             key.src_ip, key.src_port, key.dst_ip, key.dst_port, target_host
         );
 
-        let connection = match proxy {
-            Some(proxy) => {
-                self.forwarder
-                    .connect_to(&proxy, &target_host, key.dst_port, self.mark)
-                    .await
-            }
-            None => {
-                self.forwarder
-                    .connect_direct(&target_host, key.dst_port, self.mark)
-                    .await
-            }
-        };
+        let router = self.clone();
+        let client_isn = tcp.sequence_number;
+        let source = ip.source;
+        let destination = ip.destination;
+        let source_port = tcp.source_port;
+        let destination_port = tcp.destination_port;
 
-        match connection {
-            Ok(conn) => {
-                let server_isn = rand::random::<u32>();
-                let client_isn = tcp.sequence_number;
-                let state = TcpState {
-                    client_isn,
-                    server_isn,
-                    client_next_seq: client_isn.wrapping_add(1),
-                    server_next_seq: server_isn.wrapping_add(1),
+        tokio::spawn(async move {
+            // The connection is tried through the active proxy, and once more
+            // through another one when that proxy turns out to be dead.
+            //
+            // A public proxy dies without warning, and the traffic it was
+            // carrying has nowhere else to go: the policy says these
+            // destinations are proxied, so letting them out direct would
+            // undo the policy. Another proxy is tried instead, and the dead
+            // one is recorded so it stops being a candidate.
+            let mut attempt = 0;
+            let mut connection = None;
+            let mut last_error = None;
+            // The proxies that could not carry the connection. None of them is
+            // tried again.
+            let mut avoided: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+            loop {
+                let outcome = match proxy.as_ref() {
+                    Some(proxy) => {
+                        router
+                            .forwarder
+                            .connect_to(proxy, &target_host, destination_port, router.mark)
+                            .await
+                    }
+                    None => {
+                        router
+                            .forwarder
+                            .connect_direct(&target_host, destination_port, router.mark)
+                            .await
+                    }
                 };
-                self.tracker.insert(key, conn, state).await;
 
-                Some(build_tcp_packet(
-                    ip.destination,
-                    ip.source,
-                    tcp.destination_port,
-                    tcp.source_port,
-                    server_isn,
-                    client_isn.wrapping_add(1),
-                    0x12,
-                    &[],
-                ))
+                match outcome {
+                    Ok(conn) => {
+                        connection = Some(conn);
+                        break;
+                    }
+                    Err(e) => {
+                        last_error = Some(e);
+
+                        let Some(failed) = proxy.as_ref() else {
+                            break;
+                        };
+
+                        // Three tries: a public proxy dies without warning,
+                        // and the one in front is often dead long before the
+                        // health check reaches it.
+                        if attempt >= 2 {
+                            break;
+                        }
+                        attempt += 1;
+
+                        // The proxy is recorded as failed and stepped aside.
+                        router.pool.report_failure(&failed.id).await;
+                        avoided.insert(failed.id.clone());
+                        let replacement = router.pool.activate_best_avoiding(&avoided).await;
+
+                        match replacement {
+                            Some(next) => {
+                                warn!(
+                                    "the proxy {} could not carry the connection, trying {}",
+                                    failed.id, next.id
+                                );
+                                proxy = Some(next);
+                            }
+                            None => {
+                                warn!(
+                                    "the proxy {} could not carry the connection and no other proxy is available",
+                                    failed.id
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
             }
-            Err(e) => {
-                warn!("Proxy connect failed: {e}");
-                None
+
+            router.pending.lock().await.remove(&key);
+
+            match connection {
+                Some(conn) => {
+                    let server_isn = rand::random::<u32>();
+                    let state = TcpState {
+                        client_isn,
+                        server_isn,
+                        client_next_seq: client_isn.wrapping_add(1),
+                        server_next_seq: server_isn.wrapping_add(1),
+                    };
+                    router.tracker.insert(key, conn, state).await;
+                    router
+                        .tunnels_opened
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    router
+                        .respond(build_tcp_packet(
+                            destination,
+                            source,
+                            destination_port,
+                            source_port,
+                            server_isn,
+                            client_isn.wrapping_add(1),
+                            0x12,
+                            &[],
+                        ))
+                        .await;
+                }
+                None => {
+                    // The client is waiting for an answer that will not come.
+                    // A refusal ends the wait at once, and the client can try
+                    // again instead of hanging until it gives up.
+                    if let Some(e) = last_error {
+                        warn!("Proxy connect failed: {e}");
+                    }
+                    router
+                        .respond(build_tcp_packet(
+                            destination,
+                            source,
+                            destination_port,
+                            source_port,
+                            0,
+                            client_isn.wrapping_add(1),
+                            0x14,
+                            &[],
+                        ))
+                        .await;
+                }
             }
+        });
+
+        None
+    }
+
+    /// Decide how a connection that arrived at the device should go.
+    ///
+    /// The address the engine routed is the strongest signal: the engine
+    /// put it in the routing table because the policy covers it, and a
+    /// policy written in names has to work even when the router never
+    /// learned the name. The exemptions still come first — a local address
+    /// or one the policy never proxies stays out of the proxy.
+    async fn decide(&self, ip: std::net::Ipv4Addr, port: u16, hostname: Option<&str>) -> Decision {
+        let address = IpAddr::V4(ip);
+
+        if crate::routing::is_local(address) {
+            return Decision::Direct;
         }
+
+        if self.policy.matches_always_direct(address, port) {
+            return Decision::Direct;
+        }
+
+        if self.routed.read().await.contains(&ip) {
+            return Decision::Proxy;
+        }
+
+        self.policy.decide(address, port, hostname)
     }
 
     /// Forward data payload through tracked proxy connection.
@@ -221,6 +478,10 @@ impl Router {
         if let Some(tracked) = self.tracker.get(&key).await {
             let mut guard = tracked.write().await;
             if !packet.payload.is_empty() {
+                self.bytes_out.fetch_add(
+                    packet.payload.len() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 debug!("Forwarding {} bytes to proxy", packet.payload.len());
                 if let Err(e) = guard.conn.write_all(&packet.payload).await {
                     debug!("Write error, closing: {e}");
@@ -258,6 +519,8 @@ impl Router {
                         self.tracker.remove(&key).await;
                     } else {
                         buf.truncate(n);
+                        self.bytes_in
+                            .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                         debug!("Pump: read {} bytes for {:?}", n, key);
                         let pkt = build_tcp_packet(
                             key.dst_ip,

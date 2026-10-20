@@ -15,6 +15,7 @@ import {
   err,
   field,
   fieldLines,
+  formatBytes,
   live,
   muted,
   ok,
@@ -217,9 +218,14 @@ program
             ]),
             "",
             ...fieldLines(t("status.network"), [
+              [t("status.tunnelsOpened"), String(stats.tcp_connections_total ?? 0)],
               [t("status.tcpConnections"), String(stats.tcp_connections)],
               [t("status.udpFlows"), String(stats.udp_flows)],
               [t("status.dnsCache"), String(stats.dns_cache_size)],
+              [
+                t("status.traffic"),
+                `${formatBytes(stats.bytes_sent ?? 0)} / ${formatBytes(stats.bytes_received ?? 0)}`,
+              ],
             ]),
           ];
         });
@@ -259,9 +265,14 @@ program
       ]);
 
       section(t("status.network"));
+      field(t("status.tunnelsOpened"), stats.tcp_connections_total ?? 0);
       field(t("status.tcpConnections"), stats.tcp_connections);
       field(t("status.udpFlows"), stats.udp_flows);
       field(t("status.dnsCache"), stats.dns_cache_size);
+      field(
+        t("status.traffic"),
+        `${formatBytes(stats.bytes_sent ?? 0)} / ${formatBytes(stats.bytes_received ?? 0)}`,
+      );
     });
   });
 

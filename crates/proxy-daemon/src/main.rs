@@ -1,4 +1,5 @@
 mod api;
+mod policy;
 
 use anyhow::Context;
 use clap::Parser;
@@ -10,8 +11,10 @@ use proxy_core::router::Router;
 use proxy_core::scraper::{Scraper, SourceSpec};
 use proxy_core::storage::Storage;
 use proxy_core::tun_manager::{run_forwarding_loop, TunManager};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::signal;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
@@ -234,6 +237,13 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // The active proxy the operator chose, kept in memory as well as on disk.
+    //
+    // The pool is restored from disk before the first scrape, and the proxy
+    // the operator chose may only turn up in that scrape. The choice is kept
+    // until the proxy is there.
+    let remembered_active = Arc::new(RwLock::new(None::<String>));
+
     // Restore the pool before anything else runs.
     //
     // Without this the pool starts empty on every boot: the first scrape
@@ -248,6 +258,24 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(_) => info!("storage holds no proxies yet"),
             Err(e) => error!("Failed to restore pool: {e}"),
+        }
+
+        // The active proxy is remembered.
+        //
+        // It is the operator's choice, and a restart that forgets it leaves
+        // the routing policy pointing at nothing: every destination the
+        // policy covers is refused, and the host quietly loses the traffic it
+        // was supposed to have proxied.
+        let chosen = Storage::open(path)
+            .and_then(|s| s.load_setting("active_proxy"))
+            .unwrap_or(None)
+            .filter(|id| !id.is_empty());
+        if let Some(id) = chosen {
+            *remembered_active.write().await = Some(id.clone());
+            match pool.set_active(&id).await {
+                Some(proxy) => info!(id = %proxy.id, "active proxy restored"),
+                None => warn!(id = %id, "the remembered active proxy is not in the pool yet"),
+            }
         }
     }
 
@@ -407,6 +435,9 @@ async fn main() -> anyhow::Result<()> {
     // The pool over time: one sample a minute, a day of history.
     let history = api::PoolHistory::new(24 * 60);
 
+    let policy_destinations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let policy_routes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
     let app_state = api::AppState {
         history: history.clone(),
         min_score: config.pool.min_score,
@@ -421,6 +452,9 @@ async fn main() -> anyhow::Result<()> {
         eviction_policy,
         db_path: db_path.clone(),
         route_policy: route_policy.clone(),
+        policy_destinations: policy_destinations.clone(),
+        policy_routes: policy_routes.clone(),
+        remembered_active: remembered_active.clone(),
         bypass_mark,
         default_route: config.tun.default_route,
         probe_schedule: probe_schedule.clone(),
@@ -447,6 +481,7 @@ async fn main() -> anyhow::Result<()> {
         let schedule = probe_schedule.clone();
         let db_path = db_path.clone();
         let max_proxies = config.pool.max_proxies;
+        let remembered = remembered_active.clone();
 
         tokio::spawn(async move {
             // The clock is anchored on the last scrape, so the loop wakes for
@@ -474,6 +509,22 @@ async fn main() -> anyhow::Result<()> {
                         let mut s = scrape_state_clone.write().await;
                         s.running = false;
                         s.last_run = Some(last_scrape);
+                    }
+
+                    // The remembered proxy is applied once the pool knows it.
+                    //
+                    // The pool is restored from disk before the first scrape,
+                    // and the proxy the operator chose may only turn up in
+                    // that scrape. The choice is kept until the proxy is
+                    // there, so a restart does not quietly leave the routing
+                    // policy pointing at nothing.
+                    let remembered = remembered.read().await.clone();
+                    if let Some(id) = remembered {
+                        if pool_clone.active().await.is_none() {
+                            if let Some(proxy) = pool_clone.set_active(&id).await {
+                                info!(id = %proxy.id, "active proxy restored");
+                            }
+                        }
                     }
 
                     // The capacity was a configuration field nothing
@@ -701,11 +752,85 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // The policy routes.
+    //
+    // The device is not the default route. The destinations the policy names
+    // are pointed at it and everything else keeps the route it had, so a proxy
+    // that stops working takes down the destinations it was given and nothing
+    // else. The daemon's own traffic bypasses the device as well, so it cannot
+    // end up trying to reach the internet through the thing it is testing.
+    {
+        let tun = tun.clone();
+        let router = router.clone();
+        let policy = route_policy.clone();
+        let policy_destinations = policy_destinations.clone();
+        let policy_routes = policy_routes.clone();
+
+        tokio::spawn(async move {
+            // The names the policy covered last time. A name that is no
+            // longer routed is forgotten, so the cache does not grow a
+            // picture of the internet that is not there any more.
+            let mut known: Vec<std::net::Ipv4Addr> = Vec::new();
+
+            loop {
+                let resolved = policy::resolve_policy(&policy).await;
+
+                // The names the policy covers are put into the resolver's
+                // cache, so a connection arriving for one of those addresses
+                // is recognised by name — which is what the policy is written
+                // in, and what a plain HTTP request needs for its Host header.
+                let cache = router.dns_cache();
+                let mut current: Vec<std::net::Ipv4Addr> = Vec::new();
+                for (address, name) in &resolved.destinations {
+                    if let (IpAddr::V4(v4), Some(name)) = (address, name) {
+                        cache.insert(*v4, name.clone()).await;
+                        current.push(*v4);
+                    }
+                }
+                for stale in known.drain(..) {
+                    if !current.contains(&stale) {
+                        cache.remove(stale).await;
+                    }
+                }
+                known = current;
+
+                // The router is told what the device is carrying, so a
+                // connection that arrives there is proxied even when the
+                // router never learned the name behind the address.
+                router
+                    .set_routed_destinations(
+                        resolved
+                            .destinations
+                            .keys()
+                            .filter_map(|address| match address {
+                                IpAddr::V4(v4) => Some(*v4),
+                                IpAddr::V6(_) => None,
+                            })
+                            .collect(),
+                    )
+                    .await;
+
+                match policy::apply(&tun, &policy, &resolved).await {
+                    Ok(routes) => {
+                        policy_destinations
+                            .store(resolved.len(), std::sync::atomic::Ordering::Relaxed);
+                        policy_routes.store(routes, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(e) => warn!("could not apply the policy routes: {e}"),
+                }
+
+                tokio::time::sleep(Duration::from_secs(300)).await;
+            }
+        });
+    }
+
     // The sampler: one snapshot of the pool a minute, for the history.
     {
         let pool = pool.clone();
         let history = history.clone();
         let min_score = config.pool.min_score;
+        let db_path = db_path.clone();
+        let remembered = remembered_active.clone();
 
         tokio::spawn(async move {
             loop {
@@ -719,6 +844,28 @@ async fn main() -> anyhow::Result<()> {
                     working: statistics.working,
                     due: statistics.due,
                 });
+
+                // The active proxy is written down when it changes.
+                //
+                // The engine moves on by itself when the proxy in front dies,
+                // and a restart that forgot the move would put the dead proxy
+                // back in front.
+                let active = pool.active().await.map(|p| p.id);
+                let known = remembered.read().await.clone();
+                if active != known {
+                    if let Some(path) = db_path.as_ref() {
+                        let written = match active.as_ref() {
+                            Some(id) => proxy_core::storage::Storage::open(path)
+                                .and_then(|s| s.save_setting("active_proxy", id)),
+                            None => proxy_core::storage::Storage::open(path)
+                                .and_then(|s| s.save_setting("active_proxy", "")),
+                        };
+                        if let Err(e) = written {
+                            warn!("could not remember the active proxy: {e}");
+                        }
+                    }
+                    *remembered.write().await = active;
+                }
             }
         });
     }

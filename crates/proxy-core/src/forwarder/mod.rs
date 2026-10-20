@@ -49,8 +49,18 @@ impl Forwarder {
         port: u16,
         mark: Option<u32>,
     ) -> Result<ForwardConnection> {
-        let stream = connect_to_host(target, port, mark).await?;
-        Ok(Box::new(stream))
+        // The direct path has a budget too: a destination that accepts the
+        // connection and then says nothing must not hold the caller.
+        match tokio::time::timeout(DIRECT_TIMEOUT, connect_to_host(target, port, mark)).await {
+            Ok(result) => {
+                let stream = result?;
+                Ok(Box::new(stream))
+            }
+            Err(_) => anyhow::bail!(
+                "{target}:{port} did not answer within {}s",
+                DIRECT_TIMEOUT.as_secs()
+            ),
+        }
     }
 
     /// Connect to the target through the proxy.
@@ -93,9 +103,24 @@ impl Forwarder {
             );
         }
 
-        connector.connect(proxy, target, options).await
+        // The budget is the connector's business, and it is enforced here so
+        // that every protocol is covered: a proxy that accepts the
+        // connection and then says nothing must not hold the caller for
+        // longer than the budget allows.
+        match tokio::time::timeout(options.timeout, connector.connect(proxy, target, options)).await
+        {
+            Ok(result) => result,
+            Err(_) => anyhow::bail!(
+                "the {} proxy did not answer within {}s",
+                proxy.protocol,
+                options.timeout.as_secs()
+            ),
+        }
     }
 }
+
+/// How long the direct path may take to open a connection.
+const DIRECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Connect to a host, skipping the resolver for an address literal.
 ///

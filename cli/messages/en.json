@@ -44,7 +44,9 @@
     "noneSelected": "none selected",
     "engine": "Engine",
     "network": "Network",
-    "watch": "keep the dashboard up to date"
+    "watch": "keep the dashboard up to date",
+    "tunnelsOpened": "Tunnels opened",
+    "traffic": "Traffic"
   },
   "proxies": {
     "group": "Manage the proxy pool",

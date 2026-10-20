@@ -76,7 +76,14 @@ export type Summary = Static<typeof SummarySchema>;
 
 export const StatsSchema = Type.Object(
   {
+    /** The connections open at this moment. */
     tcp_connections: Type.Integer(),
+    /** The tunnels opened since the engine started. */
+    tcp_connections_total: Type.Integer(),
+    /** The bytes carried towards the destination. */
+    bytes_sent: Type.Integer(),
+    /** The bytes carried back to the client. */
+    bytes_received: Type.Integer(),
     udp_flows: Type.Integer(),
     dns_cache_size: Type.Integer(),
     healthy_count: Type.Integer(),
@@ -195,6 +202,10 @@ export const RoutingInfoSchema = Type.Object(
     bypass_mark: Type.Integer(),
     default_route: Type.Boolean(),
     active_proxy: Type.Union([Type.String(), Type.Null()]),
+    /** The destinations the policy is routing into the device. */
+    destinations: Type.Integer(),
+    /** The routes that are in the routing table. */
+    routes: Type.Integer(),
   },
   { $id: "RoutingInfo" },
 );

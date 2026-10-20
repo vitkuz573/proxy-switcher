@@ -56,9 +56,18 @@
     "tcpConnections": "TCP-соединения",
     "tcpConnectionsHint": "активных пересылок",
     "dnsCache": "Кэш DNS",
-    "dnsCacheHint": "разрешённых имён",
+    "dnsCacheHint": "имён, которые знает движок",
     "routing": "Трафик через прокси",
-    "routingNone": "Через прокси ничего не идёт. Прокси — инструмент для конкретных адресов, а не маршрут по умолчанию."
+    "routingNone": "Через прокси ничего не идёт. Прокси — инструмент для конкретных адресов, а не маршрут по умолчанию.",
+    "tunnelsOpened": "Открыто туннелей",
+    "tunnelsOpenedHint": "с запуска движка",
+    "traffic": "Трафик через устройство",
+    "connectionsNow": "{count, plural, one {# соединение открыто} few {# соединения открыто} other {# соединений открыто}}",
+    "sent": "Отправлено",
+    "received": "Получено",
+    "total": "Всего",
+    "noActiveProxy": "нет активного прокси",
+    "routingActive": "{rules, plural, one {# правило} few {# правила} other {# правил}} · {destinations, plural, one {# адресат} few {# адресата} other {# адресатов}} · {routes, plural, one {# маршрут} few {# маршрута} other {# маршрутов}} в таблице маршрутизации"
   },
   "Proxies": {
     "title": "Прокси",

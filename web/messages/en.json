@@ -56,9 +56,18 @@
     "tcpConnections": "TCP connections",
     "tcpConnectionsHint": "active forwards",
     "dnsCache": "DNS cache",
-    "dnsCacheHint": "resolved names",
+    "dnsCacheHint": "names the engine knows",
     "routing": "Proxied traffic",
-    "routingNone": "No traffic goes through a proxy. A proxy is a tool for specific destinations, not a default route."
+    "routingNone": "No traffic goes through a proxy. A proxy is a tool for specific destinations, not a default route.",
+    "tunnelsOpened": "Tunnels opened",
+    "tunnelsOpenedHint": "since the engine started",
+    "traffic": "Traffic through the device",
+    "connectionsNow": "{count, plural, one {# connection open} other {# connections open}}",
+    "sent": "Sent",
+    "received": "Received",
+    "total": "Total",
+    "noActiveProxy": "no active proxy",
+    "routingActive": "{rules, plural, one {# rule} other {# rules}} · {destinations, plural, one {# destination} other {# destinations}} · {routes, plural, one {# route} other {# routes}} in the routing table"
   },
   "Proxies": {
     "title": "Proxies",

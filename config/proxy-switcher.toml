@@ -91,9 +91,10 @@ min_score = 0.0
 [routing]
 # Which traffic a proxy applies to.
 #
-# "none" routes nothing: a proxy is a tool for specific destinations, not a
-# default route for the whole host. One dead proxy would otherwise take the
-# host's internet access with it, including the daemon's own control traffic.
+# The device is not the default route: only the destinations named here are
+# sent into it, and everything else — including the daemon's own traffic —
+# keeps the route it had. A proxy that carries one destination is a tool; a
+# proxy that carries everything is a single point of failure for the host.
 #
 #   none       nothing goes through a proxy
 #   allowlist  only what matches the rules below
@@ -102,6 +103,11 @@ mode = "none"
 # Address ranges, as "1.2.3.0/24" or a bare "1.2.3.4".
 cidrs = []
 # Hostnames or domain suffixes, as "example.com" or ".example.com".
+# A name is resolved and the addresses behind it are routed.
+#
+# The mode has to be "allowlist" for these to matter. While the mode is
+# "none" nothing is proxied, and the counters on the dashboard stay at zero —
+# which is the truth: the device is carrying nothing.
 domains = []
 # Destination ports. Empty means every port.
 ports = []

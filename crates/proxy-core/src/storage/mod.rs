@@ -33,6 +33,10 @@ impl Storage {
                 url TEXT PRIMARY KEY,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 last_scraped TEXT
+            );
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );",
         )?;
 
@@ -67,6 +71,31 @@ impl Storage {
             }
         }
         Ok(())
+    }
+
+    /// Remember a setting.
+    ///
+    /// The active proxy is a setting: it is a choice the operator made, and
+    /// a restart that forgets it leaves the routing policy pointing at
+    /// nothing, so every destination the policy covers is refused.
+    pub fn save_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            rusqlite::params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Read a setting back.
+    pub fn load_setting(&self, key: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT value FROM settings WHERE key = ?1")?;
+        let mut rows = stmt.query(rusqlite::params![key])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
     }
 
     fn has_column(&self, table: &str, column: &str) -> Result<bool> {

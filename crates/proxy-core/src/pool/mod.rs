@@ -32,6 +32,12 @@ pub struct ProxyPool {
     /// The score is derived from the measured latency, so the floor is a
     /// statement about how slow is too slow rather than an arbitrary number.
     pub min_score: f64,
+    /// When each proxy should be looked at again.
+    ///
+    /// The pool needs it for the failures the traffic itself discovers: a
+    /// proxy that could not carry a connection is looked at again after the
+    /// same wait a failed probe would get.
+    pub probe_schedule: ProbeSchedule,
     inner: Arc<RwLock<PoolInner>>,
 }
 
@@ -112,6 +118,12 @@ impl ProxyPool {
     /// Set the score floor.
     pub fn with_min_score(mut self, min_score: f64) -> Self {
         self.min_score = min_score;
+        self
+    }
+
+    /// Set when each proxy should be probed again.
+    pub fn with_probe_schedule(mut self, schedule: ProbeSchedule) -> Self {
+        self.probe_schedule = schedule;
         self
     }
 
@@ -624,6 +636,66 @@ impl ProxyPool {
             .cloned()
     }
 
+    /// Record a failure that the traffic itself discovered.
+    ///
+    /// A proxy that cannot carry a connection is no use, whatever the last
+    /// probe said. The failure is recorded the same way a failed probe is
+    /// recorded, so the streak, the score and the backoff all move together,
+    /// and the proxy stops being a candidate.
+    pub async fn report_failure(&self, id: &str) {
+        let now = chrono::Utc::now();
+        let mut inner = self.inner.write().await;
+
+        let Some(&i) = inner.index.get(id) else {
+            return;
+        };
+
+        let proxy = &mut inner.proxies[i];
+        proxy.last_checked = Some(now);
+        proxy.consecutive_failures = proxy.consecutive_failures.saturating_add(1);
+        proxy.score *= 0.5;
+        proxy.next_probe_at = now
+            + chrono::Duration::seconds(
+                self.probe_schedule
+                    .failed_backoff(proxy.consecutive_failures) as i64,
+            );
+    }
+
+    /// Make the best working proxy the active one.
+    ///
+    /// The proxies that just failed are left out: a proxy that could not
+    /// carry the connection is not the one to try next.
+    pub async fn activate_best_avoiding(
+        &self,
+        avoid: &std::collections::HashSet<String>,
+    ) -> Option<ProxyInfo> {
+        let mut inner = self.inner.write().await;
+
+        let now = chrono::Utc::now();
+
+        let candidate = inner
+            .proxies
+            .iter()
+            .filter(|p| {
+                !avoid.contains(&p.id)
+                    && p.last_success.is_some()
+                    && p.consecutive_failures == 0
+                    && p.supports_tunnel
+                    && p.score >= self.min_score
+            })
+            .max_by(|a, b| {
+                effective_score(a, now)
+                    .partial_cmp(&effective_score(b, now))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .cloned()?;
+
+        let index = inner.index.get(&candidate.id).copied()?;
+        inner.active_index = Some(index);
+
+        Some(candidate)
+    }
+
     /// Drop the current selection, leaving the pool untouched.
     pub async fn clear_active(&self) {
         self.inner.write().await.active_index = None;
@@ -678,6 +750,30 @@ impl ProxyPool {
 }
 
 /// Score 100 at 100ms, ~50 at 1s, ~10 at 5s.
+/// The score of a proxy, aged by how long ago it was checked.
+///
+/// A public proxy dies within minutes of working, so a score that says only
+/// "this one was fast when it was checked" sends the engine back to a proxy
+/// that was verified half an hour ago. The age of the check is part of the
+/// evidence: a fresh confirmation is worth more than an old one, and the
+/// difference grows the longer the confirmation is.
+fn effective_score(proxy: &ProxyInfo, now: chrono::DateTime<chrono::Utc>) -> f64 {
+    // The age is measured from the last success, not from the last check: a
+    // probe that proved nothing updates the check and leaves the score alone,
+    // so an age measured from the check would keep an hours-old result
+    // looking fresh.
+    let Some(succeeded) = proxy.last_success else {
+        return 0.0;
+    };
+
+    let age = now.signed_duration_since(succeeded).num_seconds().max(0) as f64;
+
+    // Half the weight after ten minutes, a quarter after twenty, and so on.
+    let freshness = 0.5f64.powf(age / 600.0);
+
+    proxy.score * freshness
+}
+
 fn score_for(latency_ms: u64) -> f64 {
     if latency_ms == 0 {
         0.0
@@ -722,6 +818,60 @@ mod tests {
 
     fn timeout(id: &str) -> HealthResult {
         HealthResult::inconclusive(id, "read timeout")
+    }
+
+    /// A proxy that worked, with a given score and age.
+    fn working(id: &str, score: f64, age_secs: i64) -> ProxyInfo {
+        let mut proxy = proxy(id);
+        proxy.score = score;
+        proxy.last_success = Some(chrono::Utc::now() - chrono::Duration::seconds(age_secs));
+        proxy.last_checked = proxy.last_success;
+        proxy
+    }
+
+    #[tokio::test]
+    async fn a_fresh_confirmation_outranks_an_old_one() {
+        // Both proxies scored the same when they were checked, but one was
+        // checked half an hour ago. The fresh one is the better bet: a public
+        // proxy that was fast then is very likely dead now.
+        let pool = ProxyPool::new();
+        pool.restore(vec![working("old", 3.0, 1800), working("fresh", 3.0, 0)])
+            .await;
+
+        let next = pool
+            .activate_best_avoiding(&std::collections::HashSet::new())
+            .await
+            .expect("a working proxy");
+
+        assert_eq!(next.id, "fresh");
+    }
+
+    #[tokio::test]
+    async fn a_failed_proxy_is_stepped_aside() {
+        let pool = ProxyPool::new();
+        pool.restore(vec![working("a", 3.0, 0), working("b", 2.0, 0)])
+            .await;
+
+        let avoid: std::collections::HashSet<String> = ["a".to_string()].into_iter().collect();
+        let next = pool
+            .activate_best_avoiding(&avoid)
+            .await
+            .expect("a working proxy");
+
+        assert_eq!(next.id, "b");
+        assert_eq!(pool.active().await.map(|p| p.id), Some("b".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_failure_the_traffic_found_is_recorded() {
+        let pool = ProxyPool::new();
+        pool.restore(vec![working("a", 3.0, 0)]).await;
+
+        pool.report_failure("a").await;
+
+        let proxy = &pool.all().await[0];
+        assert_eq!(proxy.consecutive_failures, 1);
+        assert!(proxy.score < 3.0, "the score must decay");
     }
 
     #[tokio::test]

@@ -171,9 +171,27 @@ impl ProxyConnector for Socks5Connector {
         target: &Target,
         options: &ConnectOptions,
     ) -> Result<BoxedStream> {
+        let started = std::time::Instant::now();
         let addrs = crate::net::resolve_host_port(&proxy.host, proxy.port).await?;
+        tracing::debug!(
+            "socks5: {} resolved to {} in {:?}",
+            proxy.host,
+            addrs.len(),
+            started.elapsed()
+        );
         let stream = crate::net::connect_first(&addrs, options.mark).await?;
+        tracing::debug!(
+            "socks5: connected to {} in {:?}",
+            proxy.host,
+            started.elapsed()
+        );
         let established = Self::handshake(stream, target, options).await?;
+        tracing::debug!(
+            "socks5: tunnel to {}:{} ready in {:?}",
+            target.host,
+            target.port,
+            started.elapsed()
+        );
         Ok(Box::new(established))
     }
 }
